@@ -158,7 +158,7 @@ class OverlayService : Service() {
                     try { wm?.updateViewLayout(ballView, ballParams) } catch (_: Exception) {}
                     true
                 }
-                MotionEvent.ACTION_UP -> { if (!dragging) showLastOrMainMenu(); true }
+                MotionEvent.ACTION_UP -> { if (!dragging) showMainMenu(); true }
                 else -> false
             }
         }
@@ -273,109 +273,161 @@ class OverlayService : Service() {
     // ==================== 可拖动面板包装 ====================
 
     private fun makeDraggablePanel(title: String, contentBuilder: (LinearLayout) -> Unit, w: Int = 280, h: Int = 400, onBack: (() -> Unit)? = null, titleIcon: Int? = null, bgColor: String = "#FDFBF7") {
+        val dm = resources.displayMetrics
+        val isLandscape = dm.widthPixels > dm.heightPixels
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            setPadding(
+                dp(if (isLandscape) 22 else 14),
+                dp(if (isLandscape) 14 else 18),
+                dp(if (isLandscape) 22 else 14),
+                dp(if (isLandscape) 14 else 18)
+            )
+            setBackgroundColor(Color.argb(178, 24, 18, 14))
+        }
+
+        val shell = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             background = GradientDrawable().apply {
-                cornerRadius = dp(12).toFloat(); setColor(Color.parseColor(bgColor)); setStroke(1, Color.parseColor("#8D6E63"))
+                cornerRadius = dp(28).toFloat()
+                setColor(Color.parseColor("#F8F2E9"))
+                setStroke(dp(1), Color.argb(90, 255, 255, 255))
+            }
+            elevation = dp(12).toFloat()
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        root.addView(shell)
+
+        val titleBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(14), dp(14), dp(14))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(Color.parseColor("#5D4037"), Color.parseColor("#B97945"))
+            ).apply {
+                cornerRadii = floatArrayOf(
+                    dp(28).toFloat(), dp(28).toFloat(),
+                    dp(28).toFloat(), dp(28).toFloat(),
+                    0f, 0f,
+                    0f, 0f
+                )
             }
         }
 
-        // 可拖动标题栏
-        val titleBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            minimumHeight = 0
-            setPadding(dp(5), dp(5), dp(5), dp(5))
-            setBackgroundColor(Color.parseColor(bgColor))
-        }
         if (titleIcon != null) {
             titleBar.addView(ImageView(this).apply {
                 setImageResource(titleIcon)
-                layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(6) }
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(16).toFloat()
+                    setColor(Color.argb(36, 255, 255, 255))
+                    setStroke(dp(1), Color.argb(62, 255, 255, 255))
+                }
+                setPadding(dp(9), dp(9), dp(9), dp(9))
+                layoutParams = LinearLayout.LayoutParams(dp(46), dp(46)).apply { marginEnd = dp(12) }
                 scaleType = ImageView.ScaleType.CENTER_INSIDE
             })
         }
-        val titleText = TextView(this).apply {
-            text = title; setTextColor(Color.parseColor("#FFF3E0")); textSize = 13f
+
+        titleBar.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        titleBar.addView(titleText)
-
-        // 返回按钮（如果不是主菜单）
-        if (title != "🎮 GG-AI Modifier") {
-            titleBar.addView(TextView(this).apply {
-                text = "返回"; setTextColor(Color.parseColor("#FFF3E0")); textSize = 12f
-                background = GradientDrawable().apply { cornerRadius = dp(4).toFloat(); setColor(Color.parseColor("#D7CCC8")) }
-                setPadding(dp(5), dp(5), dp(5), dp(5))
-                setOnClickListener { onBack?.invoke() ?: showMainMenu() }
+            addView(TextView(this@OverlayService).apply {
+                text = title
+                setTextColor(Color.WHITE)
+                textSize = if (isLandscape) 20f else 18f
+                setTypeface(null, android.graphics.Typeface.BOLD)
             })
-        }
-
-        root.addView(titleBar)
-
-        // 分割线
-        root.addView(View(this).apply {
-            setBackgroundColor(Color.parseColor("#E8DDD5"))
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
+            addView(TextView(this@OverlayService).apply {
+                text = "全屏控制台 · 横竖屏自适应 · 原功能逻辑保留"
+                setTextColor(Color.argb(220, 255, 255, 255))
+                textSize = 11.5f
+                setPadding(0, dp(3), 0, 0)
+            })
         })
 
-        // 内容区域
-        val contentArea = LinearLayout(this).apply {
+        titleBar.addView(TextView(this).apply {
+            text = "返回"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                cornerRadius = dp(999).toFloat()
+                setColor(Color.argb(34, 255, 255, 255))
+                setStroke(dp(1), Color.argb(64, 255, 255, 255))
+            }
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setOnClickListener { onBack?.invoke() ?: showMainMenu() }
+        })
+        titleBar.addView(TextView(this).apply {
+            text = "收起"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                cornerRadius = dp(999).toFloat()
+                setColor(Color.argb(24, 255, 255, 255))
+                setStroke(dp(1), Color.argb(48, 255, 255, 255))
+            }
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(8) }
+            setOnClickListener { closePanel() }
+        })
+        shell.addView(titleBar)
+
+        val contentFrame = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(14), dp(14), dp(14))
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
-        contentBuilder(contentArea)
-        root.addView(contentArea)
-
-        // 标题栏拖动支持 - 修复横屏模式下的拖动问题
-        var pix = 0; var piy = 0; var ptx = 0f; var pty = 0f; var isDragging = false
-        val dm = resources.displayMetrics
-        
-        titleBar.setOnTouchListener { _, e ->
-            when (e.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    pix = panelParams?.x ?: 0
-                    piy = panelParams?.y ?: 0
-                    ptx = e.rawX
-                    pty = e.rawY
-                    isDragging = false
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    isDragging = true
-                    val dx = (e.rawX - ptx).toInt()
-                    val dy = (e.rawY - pty).toInt()
-                    
-                    // 计算新位置，确保不超出屏幕边界
-                    val screenW = dm.widthPixels
-                    val screenH = dm.heightPixels
-                    val panelW = panelParams?.width ?: 0
-                    val panelH = panelParams?.height ?: 0
-                    
-                    var newX = pix + dx
-                    var newY = piy + dy
-                    
-                    // 限制在屏幕范围内
-                    newX = newX.coerceIn(-panelW / 2, screenW - panelW / 2)
-                    newY = newY.coerceIn(0, screenH - panelH)
-                    
-                    panelParams?.x = newX
-                    panelParams?.y = newY
-                    try { wm?.updateViewLayout(panel, panelParams) } catch (_: Exception) {}
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    isDragging
-                }
-                else -> false
+        val contentArea = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(22).toFloat()
+                setColor(Color.parseColor("#FFFFFBF5"))
+                setStroke(dp(1), Color.argb(70, 185, 121, 69))
             }
+            elevation = dp(4).toFloat()
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT)
         }
+        contentBuilder(contentArea)
+        contentFrame.addView(contentArea)
+        shell.addView(contentFrame)
 
-        // 根据面板类型选择显示方式
-        if (title == "🤖 AI 对话") {
-            showFocusablePanel(root, w, h)
-        } else {
-            showPanel(root, w, h)
+        showFocusableFullscreenPanel(root)
+    }
+
+    private fun showFocusableFullscreenPanel(view: View) {
+        closePanel()
+        panelParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE
         }
+        panel = view.apply {
+            alpha = 0f
+            scaleX = 0.985f
+            scaleY = 0.985f
+        }
+        try {
+            wm?.addView(panel, panelParams)
+            panel?.animate()?.alpha(1f)?.scaleX(1f)?.scaleY(1f)?.setDuration(160)?.start()
+        } catch (_: Exception) {}
     }
 
     // ==================== 主菜单 ====================
@@ -390,27 +442,305 @@ class OverlayService : Service() {
         }
     }
 
+    private fun showFullscreenPanel(view: View) {
+        closePanel()
+        panelParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+        }
+        panel = view.apply {
+            alpha = 0f
+            scaleX = 0.985f
+            scaleY = 0.985f
+        }
+        try {
+            wm?.addView(panel, panelParams)
+            panel?.animate()?.alpha(1f)?.scaleX(1f)?.scaleY(1f)?.setDuration(160)?.start()
+        } catch (_: Exception) {}
+    }
+
+    private fun fullscreenSectionTitle(title: String, subtitle: String): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(2), 0, dp(2), dp(10))
+            addView(TextView(this@OverlayService).apply {
+                text = title
+                setTextColor(Color.parseColor("#2B1B14"))
+                textSize = 18f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+            })
+            addView(TextView(this@OverlayService).apply {
+                text = subtitle
+                setTextColor(Color.parseColor("#7B6257"))
+                textSize = 12f
+                setPadding(0, dp(3), 0, 0)
+            })
+        }
+    }
+
+    private fun fullscreenFeatureCard(title: String, subtitle: String, iconRes: Int, tag: String, onClick: () -> Unit): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(24).toFloat()
+                setColor(Color.parseColor("#FFFFFBF5"))
+                setStroke(dp(1), Color.argb(105, 255, 255, 255))
+            }
+            elevation = dp(5).toFloat()
+            setOnClickListener {
+                animate().scaleX(0.985f).scaleY(0.985f).setDuration(65).withEndAction {
+                    scaleX = 1f
+                    scaleY = 1f
+                    onClick()
+                }.start()
+            }
+            addView(LinearLayout(this@OverlayService).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(ImageView(this@OverlayService).apply {
+                    setImageResource(iconRes)
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(18).toFloat()
+                        setColor(Color.parseColor("#FFE4C7"))
+                    }
+                    setPadding(dp(10), dp(10), dp(10), dp(10))
+                    layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginEnd = dp(12) }
+                })
+                addView(TextView(this@OverlayService).apply {
+                    text = tag
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.parseColor("#5D4037"))
+                    textSize = 10f
+                    setTypeface(null, android.graphics.Typeface.BOLD)
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(999).toFloat()
+                        setColor(Color.parseColor("#FFF1E4"))
+                        setStroke(dp(1), Color.parseColor("#22B97945"))
+                    }
+                    setPadding(dp(9), dp(5), dp(9), dp(5))
+                })
+            })
+            addView(TextView(this@OverlayService).apply {
+                text = title
+                setTextColor(Color.parseColor("#2B1B14"))
+                textSize = 17f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                setPadding(0, dp(14), 0, dp(4))
+            })
+            addView(TextView(this@OverlayService).apply {
+                text = subtitle
+                setTextColor(Color.parseColor("#7B6257"))
+                textSize = 12f
+            })
+        }
+    }
+
+    private fun fullscreenStatusCard(): LinearLayout {
+        val pid = MemoryEngine.getAttachedPid()
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(24).toFloat()
+                setColor(Color.parseColor("#FFFFFBF5"))
+                setStroke(dp(1), Color.argb(105, 255, 255, 255))
+            }
+            elevation = dp(5).toFloat()
+            addView(TextView(this@OverlayService).apply {
+                text = "当前状态"
+                setTextColor(Color.parseColor("#2B1B14"))
+                textSize = 16f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+            })
+            addView(TextView(this@OverlayService).apply {
+                text = if (pid != null) "● 已附加 PID:$pid" else "● 未附加进程"
+                setTextColor(if (pid != null) Color.parseColor("#2E7D5B") else Color.parseColor("#C47A16"))
+                textSize = 13f
+                setPadding(0, dp(10), 0, 0)
+            })
+            addView(TextView(this@OverlayService).apply {
+                text = "● 全屏菜单已启用 · 横竖屏自适应"
+                setTextColor(Color.parseColor("#7B6257"))
+                textSize = 12f
+                setPadding(0, dp(6), 0, 0)
+            })
+            addView(TextView(this@OverlayService).apply {
+                text = "提示：点击收起可回到小悬浮球，功能入口仍保持原逻辑。"
+                setTextColor(Color.parseColor("#7B6257"))
+                textSize = 12f
+                setPadding(0, dp(10), 0, 0)
+            })
+        }
+    }
+
+    private fun fullscreenActionPill(text: String, onClick: () -> Unit): TextView {
+        return TextView(this).apply {
+            this.text = text
+            gravity = Gravity.CENTER
+            setTextColor(Color.parseColor("#5D4037"))
+            textSize = 13f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(999).toFloat()
+                setColor(Color.parseColor("#FFE4C7"))
+                setStroke(dp(1), Color.parseColor("#33B97945"))
+            }
+            setOnClickListener { onClick() }
+        }
+    }
+
     private fun showMainMenu() {
         saveLastPanel("menu")
-        makeDraggablePanel("GG-AI Modifier", { content ->
-            val sv = ScrollView(this).apply {
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        val dm = resources.displayMetrics
+        val isLandscape = dm.widthPixels > dm.heightPixels
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(
+                dp(if (isLandscape) 22 else 14),
+                dp(if (isLandscape) 14 else 18),
+                dp(if (isLandscape) 22 else 14),
+                dp(if (isLandscape) 14 else 18)
+            )
+            setBackgroundColor(Color.argb(178, 24, 18, 14))
+        }
+
+        val shell = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(28).toFloat()
+                setColor(Color.parseColor("#F8F2E9"))
+                setStroke(dp(1), Color.argb(90, 255, 255, 255))
             }
-            val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(8), dp(12), dp(8)) }
+            elevation = dp(12).toFloat()
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        root.addView(shell)
 
-            list.addView(menuBtn("附加进程", R.drawable.jingcheng) { showProcessPanel() })
-            list.addView(menuBtn("内存搜索", R.drawable.neichun) { showSearchPanel() })
-            list.addView(menuBtn("AI 对话", R.drawable.ai) { showAIChatPanel() })
-            list.addView(menuBtn("脚本库", R.drawable.jiaoben) { showScriptPanel() })
+        val hero = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(16), dp(14), dp(16))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(Color.parseColor("#5D4037"), Color.parseColor("#B97945"))
+            ).apply {
+                cornerRadii = floatArrayOf(
+                    dp(28).toFloat(), dp(28).toFloat(),
+                    dp(28).toFloat(), dp(28).toFloat(),
+                    0f, 0f,
+                    0f, 0f
+                )
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        hero.addView(ImageView(this).apply {
+            setImageResource(R.drawable.xfc)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(18).toFloat()
+                setColor(Color.argb(36, 255, 255, 255))
+                setStroke(dp(1), Color.argb(62, 255, 255, 255))
+            }
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            layoutParams = LinearLayout.LayoutParams(dp(54), dp(54)).apply { marginEnd = dp(14) }
+        })
+        hero.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            addView(TextView(this@OverlayService).apply {
+                text = "GG-AI 全屏控制台"
+                setTextColor(Color.WHITE)
+                textSize = if (isLandscape) 21f else 19f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+            })
+            addView(TextView(this@OverlayService).apply {
+                val pid = MemoryEngine.getAttachedPid()
+                text = if (pid != null) "已附加进程 · PID:$pid" else "未附加进程 · 请选择目标"
+                setTextColor(Color.argb(220, 255, 255, 255))
+                textSize = 12f
+                setPadding(0, dp(4), 0, 0)
+            })
+        })
+        hero.addView(TextView(this).apply {
+            text = "收起"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                cornerRadius = dp(999).toFloat()
+                setColor(Color.argb(34, 255, 255, 255))
+                setStroke(dp(1), Color.argb(64, 255, 255, 255))
+            }
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setOnClickListener { closePanel() }
+        })
+        shell.addView(hero)
 
-            sv.addView(list); content.addView(sv)
+        val body = LinearLayout(this).apply {
+            orientation = if (isLandscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(12))
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+        shell.addView(body)
 
-            // 底部按钮
-            val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(12), dp(8), dp(12), dp(8)) }
-            bar.addView(iconBtn(R.drawable.gb_xfc, "悬浮窗") { stopSelf() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            bar.addView(iconBtn(R.drawable.ck_gb, "菜单") { closePanel() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            content.addView(bar)
-        }, 250, 380, titleIcon = R.drawable.xfc, bgColor = "#C9A882")
+        val primary = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = if (isLandscape) {
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 3f).apply { marginEnd = dp(14) }
+            } else {
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+            }
+        }
+        body.addView(primary)
+
+        primary.addView(fullscreenSectionTitle("核心功能", "常用入口，适合横竖屏快速操作"))
+        val firstRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        firstRow.addView(fullscreenFeatureCard("附加进程", "选择目标应用", R.drawable.jingcheng, "READY") { showProcessPanel() }, LinearLayout.LayoutParams(0, dp(if (isLandscape) 116 else 104), 1f).apply { marginEnd = dp(8) })
+        firstRow.addView(fullscreenFeatureCard("内存搜索", "精确 / 模糊 / 范围", R.drawable.neichun, "SEARCH") { showSearchPanel() }, LinearLayout.LayoutParams(0, dp(if (isLandscape) 116 else 104), 1f).apply { marginStart = dp(8) })
+        primary.addView(firstRow)
+        val secondRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(14), 0, 0) }
+        secondRow.addView(fullscreenFeatureCard("AI 对话", "上下文辅助分析", R.drawable.ai, "AI") { showAIChatPanel() }, LinearLayout.LayoutParams(0, dp(if (isLandscape) 116 else 104), 1f).apply { marginEnd = dp(8) })
+        secondRow.addView(fullscreenFeatureCard("脚本库", "运行与管理脚本", R.drawable.jiaoben, "LUA") { showScriptPanel() }, LinearLayout.LayoutParams(0, dp(if (isLandscape) 116 else 104), 1f).apply { marginStart = dp(8) })
+        primary.addView(secondRow)
+
+        val secondary = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = if (isLandscape) {
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 2f)
+            } else {
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) }
+            }
+        }
+        body.addView(secondary)
+        secondary.addView(fullscreenSectionTitle("状态与快捷操作", "减少遮挡，保持游戏内操作流畅"))
+        secondary.addView(fullscreenStatusCard())
+        secondary.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(12), 0, 0)
+            addView(fullscreenActionPill("打开主界面") {
+                try { startActivity(Intent(this@OverlayService, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
+            }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(6) })
+            addView(fullscreenActionPill("关闭悬浮窗") { stopSelf() }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(6) })
+        })
+
+        showFullscreenPanel(root)
     }
 
     // ==================== 进程面板 ====================
