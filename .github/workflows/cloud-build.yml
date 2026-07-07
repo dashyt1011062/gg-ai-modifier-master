@@ -1,0 +1,65 @@
+name: Cloud Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_mode:
+        description: "Flutter APK build mode"
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - release
+          - debug
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  android-apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show tool versions
+        run: |
+          flutter --version
+          dart --version
+          java -version
+
+      - name: Restore Flutter generated Android files
+        run: flutter create --platforms=android .
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        run: |
+          MODE="${{ github.event.inputs.build_mode || 'release' }}"
+          flutter build apk --"$MODE"
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gg-ai-modifier-apk-${{ github.event.inputs.build_mode || 'release' }}
+          path: build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
