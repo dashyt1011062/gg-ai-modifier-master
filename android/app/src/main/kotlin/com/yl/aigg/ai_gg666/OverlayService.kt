@@ -4773,7 +4773,6 @@ class OverlayService : Service() {
                         buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
                     }, LinearLayout.LayoutParams(dp(48), dp(48)))
                     val values = AggWrapLayout(this).apply {
-                        gravity = Gravity.CENTER_VERTICAL
                         minimumHeight = dp(48)
                     }
                     values.addView(ImageView(this).apply {
@@ -8791,7 +8790,6 @@ class OverlayService : Service() {
             }
             val fillRow = AggWrapLayout(this).apply {
                 minimumHeight = dp(48)
-                gravity = Gravity.CENTER_VERTICAL
             }
             fun addFill(label: String, action: () -> Unit) {
                 fillRow.addView(fillButton(label, action), LinearLayout.LayoutParams(
@@ -10903,6 +10901,14 @@ mainMenu()""",
                 })
             }
         }
+    }
+
+    private fun emptyHint(message: String): TextView = TextView(this).apply {
+        text = message
+        gravity = Gravity.CENTER
+        setTextColor(Color.parseColor("#938F99"))
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        setPadding(dp(12), dp(30), dp(12), dp(30))
     }
 
     private fun divider(horizontal: Boolean = true): View = View(this).apply {
