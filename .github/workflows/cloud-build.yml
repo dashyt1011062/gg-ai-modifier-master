@@ -54,8 +54,28 @@ jobs:
 
       - name: Build APK
         run: |
+          set -o pipefail
           MODE="${{ github.event.inputs.build_mode || 'release' }}"
-          flutter build apk --"$MODE"
+          flutter build apk --"$MODE" 2>&1 | tee build.log
+
+      - name: Surface build errors
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          log = Path("build.log")
+          if not log.exists():
+              print("::error::build.log was not created")
+              raise SystemExit(0)
+          lines = log.read_text(errors="replace").splitlines()
+          needles = (" e: ", "error:", "Unresolved reference", "Type mismatch", "Cannot infer", "Smart cast", "Compilation error")
+          matches = [line.strip() for line in lines if any(needle in f" {line}" for needle in needles)]
+          if not matches:
+              matches = lines[-80:]
+          for line in matches[-80:]:
+              line = line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error::{line}")
+          PY
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
