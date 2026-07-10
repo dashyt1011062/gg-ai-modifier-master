@@ -24,6 +24,7 @@ object MemoryEngine {
     private var activeRegions: List<MemRegion> = emptyList()
     private var lastSnapshot: Map<Long, ByteArray> = emptyMap()
     private var lastSnapshotType: String? = null
+    private var lastSnapshotIsFuzzy = false
     private val aobDatabase = mutableMapOf<Long, AobSignature>()
     private var appContext: Context? = null
     private var lastLivenessCheckAt = 0L
@@ -91,6 +92,7 @@ object MemoryEngine {
             activeRegions = emptyList()
             lastSnapshot = emptyMap()
             lastSnapshotType = null
+            lastSnapshotIsFuzzy = false
             aobDatabase.clear()
 
             val ctx = appContext ?: run {
@@ -163,6 +165,7 @@ object MemoryEngine {
         activeRegions = emptyList()
         lastSnapshot = emptyMap()
         lastSnapshotType = null
+        lastSnapshotIsFuzzy = false
         aobDatabase.clear()
         lastLivenessResult = false
         lastLivenessCheckAt = 0L
@@ -177,8 +180,20 @@ object MemoryEngine {
     fun resetSearchState() {
         lastSnapshot = emptyMap()
         lastSnapshotType = null
+        lastSnapshotIsFuzzy = false
         aobDatabase.clear()
     }
+
+    @Synchronized
+    fun hasFuzzySearchSession(type: String? = null): Boolean {
+        return lastSnapshotIsFuzzy && lastSnapshot.isNotEmpty() && (type == null || lastSnapshotType == type)
+    }
+
+    @Synchronized
+    fun getFuzzySearchType(): String? = lastSnapshotType.takeIf { lastSnapshotIsFuzzy && lastSnapshot.isNotEmpty() }
+
+    @Synchronized
+    fun getFuzzySearchCount(): Int = if (lastSnapshotIsFuzzy) lastSnapshot.size else 0
 
     fun isAttachedProcessAlive(force: Boolean = false): Boolean {
         val pid = attachedPid ?: return false
@@ -417,6 +432,7 @@ object MemoryEngine {
     fun searchExact(value: Any, type: String): List<Map<String, Any>> {
         val pid = attachedPid ?: return emptyList()
         if (!isSupportedType(type) || activeRegions.isEmpty() || !isAttachedProcessAlive()) return emptyList()
+        lastSnapshotIsFuzzy = false
 
         return try {
             val targetBytes = valueToBytes(value, type) ?: return emptyList()
@@ -439,7 +455,7 @@ object MemoryEngine {
 
             val results = addresses.map { addr -> createResultMap(addr, value, type) }
             enrichWithMachineCode(pid, results)
-            saveSnapshot(results, type)
+            saveSnapshot(results, type, isFuzzy = false)
             results
         } catch (e: Exception) {
             Log.e(TAG, "searchExact failed: ${e.message}", e)
@@ -450,6 +466,7 @@ object MemoryEngine {
     fun searchByRange(minValue: Number, maxValue: Number, type: String): List<Map<String, Any>> {
         val pid = attachedPid ?: return emptyList()
         if (!isSupportedType(type) || activeRegions.isEmpty() || !isAttachedProcessAlive()) return emptyList()
+        lastSnapshotIsFuzzy = false
 
         return try {
             val typeSize = getTypeSize(type)
@@ -473,7 +490,7 @@ object MemoryEngine {
                 createResultMap(addr, current, type)
             }
             enrichWithMachineCode(pid, results)
-            saveSnapshot(results, type)
+            saveSnapshot(results, type, isFuzzy = false)
             results
         } catch (e: Exception) {
             Log.e(TAG, "searchByRange failed: ${e.message}", e)
@@ -484,6 +501,7 @@ object MemoryEngine {
     fun filterResults(previousAddresses: List<Long>, value: Any, type: String): List<Map<String, Any>> {
         val pid = attachedPid ?: return emptyList()
         if (!isSupportedType(type) || !isAttachedProcessAlive()) return emptyList()
+        lastSnapshotIsFuzzy = false
 
         return try {
             val typeSize = getTypeSize(type)
@@ -502,7 +520,7 @@ object MemoryEngine {
 
             if (results.isNotEmpty()) {
                 enrichWithMachineCode(pid, results)
-                saveSnapshot(results, type)
+                saveSnapshot(results, type, isFuzzy = false)
             }
             results
         } catch (e: Exception) { emptyList() }
@@ -512,9 +530,9 @@ object MemoryEngine {
         val pid = attachedPid ?: return emptyList()
         if (!isSupportedType(type) || activeRegions.isEmpty() || !isAttachedProcessAlive()) return emptyList()
 
-        if (lastSnapshot.isEmpty() || lastSnapshotType != type) {
+        if (!lastSnapshotIsFuzzy || lastSnapshot.isEmpty() || lastSnapshotType != type) {
             val initialResults = searchAllValues(type)
-            saveSnapshot(initialResults, type)
+            saveSnapshot(initialResults, type, isFuzzy = true)
             return initialResults
         }
 
@@ -549,7 +567,7 @@ object MemoryEngine {
                 createResultMap(addr, value ?: 0, type)
             }
             enrichWithMachineCode(pid, results)
-            saveSnapshot(results, type)
+            saveSnapshot(results, type, isFuzzy = true)
             results
         } catch (e: Exception) { emptyList() }
     }
@@ -557,6 +575,7 @@ object MemoryEngine {
     fun searchAob(pattern: String, mask: String? = null): List<Map<String, Any>> {
         val pid = attachedPid ?: return emptyList()
         if (activeRegions.isEmpty() || !isAttachedProcessAlive()) return emptyList()
+        lastSnapshotIsFuzzy = false
 
         // 检测是否为地址格式（0x开头的单个十六进制数）
         val addrLong = parseAddress(pattern)
@@ -687,6 +706,7 @@ object MemoryEngine {
         if (address <= 0L || !isSupportedType(type) || attachedPid == null || !isAttachedProcessAlive()) {
             return emptyList()
         }
+        lastSnapshotIsFuzzy = false
         val value = readMemory(address, type) ?: return emptyList()
         val bytes = readBytes(address, getTypeSize(type)) ?: byteArrayOf()
         return listOf(
@@ -1082,13 +1102,14 @@ object MemoryEngine {
 
     // ==================== 快照 ====================
 
-    private fun saveSnapshot(results: List<Map<String, Any>>, type: String) {
+    private fun saveSnapshot(results: List<Map<String, Any>>, type: String, isFuzzy: Boolean) {
         val pid = attachedPid ?: return
         val typeSize = getTypeSize(type)
         val addresses = results.mapNotNull { (it["addressInt"] as? Number)?.toLong() }
         if (addresses.isEmpty()) {
             lastSnapshot = emptyMap()
             lastSnapshotType = type
+            lastSnapshotIsFuzzy = isFuzzy
             return
         }
 
@@ -1101,6 +1122,7 @@ object MemoryEngine {
         }
         lastSnapshot = snapshot
         lastSnapshotType = type
+        lastSnapshotIsFuzzy = isFuzzy
     }
 
     // ==================== 工具函数 ====================

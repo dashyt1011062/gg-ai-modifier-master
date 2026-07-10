@@ -3390,7 +3390,7 @@ class OverlayService : Service() {
                         .map { searchResults[it] }
                     // 原版搜索工具栏顺序：已知值搜索、变化搜索、附近搜索、编辑、保存、筛选、选择。
                     toolbarAction(R.drawable.ic_search_selected_white_24dp) { showAggSearchDialog("exact") }
-                    toolbarAction(R.drawable.ic_search_changed_white_24dp) { showAggSearchDialog("fuzzy") }
+                    toolbarAction(R.drawable.ic_search_changed_white_24dp) { showAggFuzzySearchPanel() }
                     toolbarAction(R.drawable.ic_search_nearby_white_24dp) { showAggSearchDialog("nearby") }
                     toolbarAction(R.drawable.ic_agg_edit) {
                         val selected = selectedResults()
@@ -5901,8 +5901,8 @@ class OverlayService : Service() {
     }
 
     private fun showAggSearchDialog(mode: String = currentSearchMode) {
-        // service_searcher.xml 由同一套视图根据入口切换 value/fuzzy/nearby/address/AOB 状态。
-        currentSearchMode = mode.takeIf { it in setOf("exact", "fuzzy", "nearby", "addr", "machine") } ?: "exact"
+        // 精确/附近/地址/AOB 使用 service_searcher；模糊搜索使用独立界面。
+        currentSearchMode = mode.takeIf { it in setOf("exact", "nearby", "addr", "machine") } ?: "exact"
         val attachedPid = MemoryEngine.getAttachedPid()
         if (attachedPid == null || !MemoryEngine.isAttachedProcessAlive()) {
             showProcessPanel()
@@ -5981,7 +5981,6 @@ class OverlayService : Service() {
 
             val message = mediumText(
                 when (currentSearchMode) {
-                    "fuzzy" -> if (searchResults.isEmpty()) "未知值（模糊）搜索" else "在当前快照中继续模糊搜索"
                     "nearby" -> "输入要在附近搜索的值"
                     "addr" -> "输入搜索地址"
                     "machine" -> "输入要搜索的字节或特征码"
@@ -5995,7 +5994,7 @@ class OverlayService : Service() {
 
             val valueRow = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                visibility = if (currentSearchMode == "fuzzy") View.GONE else View.VISIBLE
+                visibility = View.VISIBLE
             }
             val valueLine = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -6077,7 +6076,7 @@ class OverlayService : Service() {
             val typeRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                visibility = if (currentSearchMode in setOf("exact", "fuzzy", "nearby")) View.VISIBLE else View.GONE
+                visibility = if (currentSearchMode in setOf("exact", "nearby")) View.VISIBLE else View.GONE
             }
             typeRow.addView(smallText("类型："))
             val typeSpinner = whiteSpinner(typeLabels).apply {
@@ -6128,11 +6127,7 @@ class OverlayService : Service() {
             }
             body.addView(modeRow)
 
-            val fuzzyRow = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                visibility = if (currentSearchMode in setOf("exact", "fuzzy")) View.VISIBLE else View.GONE
-            }
-            fuzzyRow.addView(smallText(if (searchResults.isEmpty()) "未知（模糊）搜索" else "在当前快照中继续模糊搜索"))
+            // 模糊搜索不在精确搜索弹窗中显示。
 
             // 对齐 memory_range.xml：范围按钮 + nearby_row（地址/之前/后/距离）。
             val selectedNearbyAddress = selectedIndices.firstOrNull { it in searchResults.indices }
@@ -6362,20 +6357,6 @@ class OverlayService : Service() {
                 }
             }
 
-            fun fuzzyButton(label: String, mode: String): TextView = button(label) {
-                val type = normalizeType() ?: return@button
-                runSearch(type) { MemoryEngine.searchFuzzy(mode, type) }
-            }
-            val fuzzyLine1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            fuzzyLine1.addView(fuzzyButton("无变化", "unchanged"), LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
-            fuzzyLine1.addView(fuzzyButton("有变化", "changed"), LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(2) })
-            fuzzyRow.addView(fuzzyLine1)
-            val fuzzyLine2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            fuzzyLine2.addView(fuzzyButton("增加了", "increased"), LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
-            fuzzyLine2.addView(fuzzyButton("减少了", "decreased"), LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(2) })
-            fuzzyRow.addView(fuzzyLine2)
-            body.addView(fuzzyRow)
-
             val selectedCodes = MemoryEngine.getSelectedRegionCategories().joinToString(",") { id ->
                 when (id) {
                     "heap" -> "Ch"
@@ -6395,7 +6376,7 @@ class OverlayService : Service() {
                 dp(48),
             ))
             body.addView(nearbyRow)
-            if (currentSearchMode != "fuzzy") {
+            run {
                 val triggerLabel = when (currentSearchMode) {
                     "addr" -> "搜索地址"
                     "machine" -> "搜索特征码"
@@ -6425,7 +6406,7 @@ class OverlayService : Service() {
                     "double" -> "输入双精度浮点值"
                     else -> "Xor 类型"
                 }
-                typeHint.visibility = if (currentSearchMode in setOf("exact", "fuzzy", "nearby")) View.VISIBLE else View.GONE
+                typeHint.visibility = if (currentSearchMode in setOf("exact", "nearby")) View.VISIBLE else View.GONE
             }
             typeSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
@@ -6442,36 +6423,270 @@ class OverlayService : Service() {
         }, 390, 620, onBack = { showAggSearchTab() }, titleIcon = R.drawable.ic_magnify_white_24dp)
     }
 
+    private fun showCurrentSearchPanel() {
+        if (currentSearchMode == "fuzzy") showAggFuzzySearchPanel()
+        else showAggSearchDialog(currentSearchMode)
+    }
+
+    private fun runAggFuzzySearch(comparison: String, iterations: Int = 1) {
+        val attachedPid = MemoryEngine.getAttachedPid()
+        if (attachedPid == null || !MemoryEngine.isAttachedProcessAlive()) {
+            showProcessPanel()
+            return
+        }
+        val type = MemoryEngine.getFuzzySearchType()
+            ?: searchDataType.takeIf { MemoryEngine.isSupportedType(it) }
+            ?: "dword"
+        val safeIterations = iterations.coerceIn(1, 30)
+        Toast.makeText(this, "正在执行模糊搜索…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val autoPause = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
+                .getBoolean("agg_autopause", false)
+            val wasPaused = autoPause && isTargetProcessPaused(attachedPid)
+            val pausedByUs = autoPause && !wasPaused && setTargetProcessPaused(attachedPid, true)
+            var results: List<Map<String, Any>> = emptyList()
+            try {
+                for (index in 0 until safeIterations) {
+                    results = MemoryEngine.searchFuzzy(comparison, type)
+                    if (results.isEmpty()) break
+                }
+            } catch (_: Exception) {
+                results = emptyList()
+            } finally {
+                if (pausedByUs) setTargetProcessPaused(attachedPid, false)
+            }
+            handler.post {
+                searchDataType = type
+                searchResults = results
+                selectedIndices.clear()
+                focusedSearchResultIndex = -1
+                Toast.makeText(this@OverlayService, "找到 ${results.size} 个结果", Toast.LENGTH_SHORT).show()
+                showAggSearchTab()
+            }
+        }.start()
+    }
+
+    private fun showAggFuzzySearchPanel() {
+        val attachedPid = MemoryEngine.getAttachedPid()
+        if (attachedPid == null || !MemoryEngine.isAttachedProcessAlive()) {
+            showProcessPanel()
+            return
+        }
+        currentSearchMode = "fuzzy"
+        saveLastPanel("search")
+        val hasSession = MemoryEngine.hasFuzzySearchSession()
+        val sessionType = MemoryEngine.getFuzzySearchType()
+        val typeIds = arrayOf("auto", "dword", "float", "double", "word", "byte", "qword")
+        val typeLabels = arrayOf("Auto", "Dword", "Float", "Double", "Word", "Byte", "Qword")
+
+        makeDraggablePanel("未知（模糊）搜索", { content ->
+            content.setPadding(dp(20), dp(20), dp(20), dp(20))
+
+            fun button(label: String, action: () -> Unit): TextView = TextView(this).apply {
+                text = label
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                minimumWidth = dp(48)
+                minimumHeight = dp(48)
+                background = aggMenuDrawable(Color.argb(36, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
+                setOnClickListener { action() }
+            }
+
+            fun label(value: String, size: Float = 14f): TextView = TextView(this).apply {
+                text = value
+                gravity = Gravity.CENTER_VERTICAL
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, size)
+            }
+
+            fun typeSpinner(): Spinner = Spinner(this).apply {
+                adapter = object : ArrayAdapter<String>(this@OverlayService, android.R.layout.simple_spinner_item, typeLabels) {
+                    override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                        return (super.getView(position, convertView, parent) as TextView).apply {
+                            setTextColor(Color.WHITE)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            gravity = Gravity.CENTER
+                        }
+                    }
+                    override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
+                        return (super.getDropDownView(position, convertView, parent) as TextView).apply {
+                            setTextColor(Color.WHITE)
+                            setBackgroundColor(Color.parseColor("#2B2930"))
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            setPadding(dp(12), dp(10), dp(12), dp(10))
+                        }
+                    }
+                }.apply { setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+                background = aggMenuDrawable(Color.argb(32, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
+            }
+
+            if (!hasSession) {
+                content.addView(label("选择要搜索的数据类型", 18f))
+                val spinner = typeSpinner().apply {
+                    setSelection(typeIds.indexOf(searchDataType).takeIf { it >= 0 } ?: 1)
+                }
+                content.addView(LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(label("类型："))
+                    addView(spinner, LinearLayout.LayoutParams(0, dp(48), 1f))
+                })
+                content.addView(label("首次搜索会建立未知值快照。之后再次打开模糊搜索，选择数值的变化情况。", 12f).apply {
+                    setTextColor(Color.parseColor("#CAC4D0"))
+                    setPadding(0, 0, 0, dp(8))
+                })
+
+                val selectedCodes = MemoryEngine.getSelectedRegionCategories().joinToString(",") { id ->
+                    when (id) {
+                        "heap" -> "Ch"
+                        "java" -> "Jh"
+                        "anonymous" -> "A"
+                        "stack" -> "S"
+                        "app" -> "Cd"
+                        "system" -> "O"
+                        else -> "O"
+                    }
+                }
+                val rangeTitle = if (
+                    MemoryEngine.getSelectedRegionCategories().containsAll(MemoryEngine.getRegionCategoryIds()) || selectedCodes.isBlank()
+                ) "在全部内存中" else selectedCodes
+                content.addView(button(rangeTitle) { showRegionPanel() }, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(48),
+                ))
+                content.addView(button("搜索") {
+                    val selected = typeIds[spinner.selectedItemPosition.coerceIn(typeIds.indices)]
+                    val type = if (selected == "auto") "dword" else selected
+                    if (selected == "auto") {
+                        Toast.makeText(this@OverlayService, "Auto 当前按 Dword 建立模糊快照", Toast.LENGTH_SHORT).show()
+                    }
+                    searchDataType = type
+                    searchResults = emptyList()
+                    selectedIndices.clear()
+                    MemoryEngine.resetSearchState()
+                    runAggFuzzySearch("changed")
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)).apply {
+                    topMargin = dp(5)
+                })
+            } else {
+                val count = MemoryEngine.getFuzzySearchCount()
+                content.addView(label("找到：$count", 18f))
+                content.addView(label("类型：${sessionType?.replaceFirstChar { it.uppercase() } ?: searchDataType}", 12f).apply {
+                    setTextColor(Color.parseColor("#CAC4D0"))
+                })
+                content.addView(label("数值发生了什么变化？").apply {
+                    setPadding(0, dp(8), 0, dp(5))
+                })
+
+                val line1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                line1.addView(button("值无变化") { showAggFuzzyEqualCountPanel() }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
+                line1.addView(button("值发生变化") { runAggFuzzySearch("changed") }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(2) })
+                content.addView(line1)
+                val line2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                line2.addView(button("值增加") { runAggFuzzySearch("increased") }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
+                line2.addView(button("值减小") { runAggFuzzySearch("decreased") }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(2) })
+                content.addView(line2)
+                content.addView(button("新搜索") {
+                    MemoryEngine.resetSearchState()
+                    searchResults = emptyList()
+                    selectedIndices.clear()
+                    focusedSearchResultIndex = -1
+                    showAggFuzzySearchPanel()
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)).apply {
+                    topMargin = dp(5)
+                })
+            }
+
+            val footer = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(5), 0, 0)
+            }
+            footer.addView(button("取消") { showAggSearchTab() }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
+            footer.addView(button("更多") { showAggSearchMorePanel() }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(2) })
+            content.addView(footer)
+        }, 390, if (hasSession) 390 else 430, onBack = { showAggSearchTab() }, titleIcon = R.drawable.ic_search_changed_white_24dp)
+    }
+
+    private fun showAggFuzzyEqualCountPanel() {
+        if (!MemoryEngine.hasFuzzySearchSession()) {
+            showAggFuzzySearchPanel()
+            return
+        }
+        makeDraggablePanel("值无变化", { content ->
+            content.setPadding(dp(20), dp(16), dp(20), dp(10))
+            content.addView(TextView(this).apply {
+                text = "请选择运行“值无变化”的次数："
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            })
+            val countText = TextView(this).apply {
+                text = "1"
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+            }
+            content.addView(countText, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
+            val seek = android.widget.SeekBar(this).apply {
+                max = 29
+                progress = 0
+                setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
+                        countText.text = (progress + 1).toString()
+                    }
+                    override fun onStartTrackingTouch(seekBar: android.widget.SeekBar?) = Unit
+                    override fun onStopTrackingTouch(seekBar: android.widget.SeekBar?) = Unit
+                })
+            }
+            content.addView(seek, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+            fun button(label: String, action: () -> Unit): TextView = TextView(this).apply {
+                text = label
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                background = aggMenuDrawable(Color.argb(36, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
+                setOnClickListener { action() }
+            }
+            val footer = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(8), 0, 0)
+            }
+            footer.addView(button("取消") { showAggFuzzySearchPanel() }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
+            footer.addView(button("运行") { runAggFuzzySearch("unchanged", seek.progress + 1) }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(2) })
+            content.addView(footer)
+        }, 360, 270, onBack = { showAggFuzzySearchPanel() }, titleIcon = R.drawable.ic_search_changed_white_24dp)
+    }
+
+
     private fun showAggSearchMorePanel() {
         makeDraggablePanel("更多", { content ->
             content.setPadding(dp(20), dp(20), dp(20), dp(20))
             fun divider(): View = View(this).apply { setBackgroundColor(Color.argb(52, 255, 255, 255)) }
-            fun option(label: String, mode: String? = null, action: (() -> Unit)? = null): TextView = TextView(this).apply {
+            fun option(label: String, action: () -> Unit): TextView = TextView(this).apply {
                 text = label
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(20), dp(10), dp(12), dp(10))
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
                 setBackgroundColor(Color.TRANSPARENT)
-                setOnClickListener {
-                    if (mode != null) showAggSearchDialog(mode) else action?.invoke()
-                }
+                setOnClickListener { action() }
             }
-            val entries = listOf<Pair<String, String?>>(
-                "已知值搜索" to "exact",
-                "变化搜索" to "fuzzy",
-                "附近搜索" to "nearby",
-                "地址搜索" to "addr",
-                "特征码搜索" to "machine",
+            val entries = listOf<Pair<String, () -> Unit>>(
+                "已知（精确）搜索" to { showAggSearchDialog("exact") },
+                "未知（模糊）搜索" to { showAggFuzzySearchPanel() },
+                "搜索附近" to { showAggSearchDialog("nearby") },
+                "地址搜索" to { showAggSearchDialog("addr") },
+                "特征码搜索" to { showAggSearchDialog("machine") },
             )
-            entries.forEach { (label, mode) ->
-                content.addView(option(label, mode), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            entries.forEach { (label, action) ->
+                content.addView(option(label, action), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
                 content.addView(divider(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
             }
             content.addView(option("搜索结果过滤") { showAggResultFilterPanel() }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
             content.addView(divider(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
             content.addView(option("设置搜索范围") { showRegionPanel() }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        }, 340, 470, onBack = { showAggSearchDialog(currentSearchMode) }, titleIcon = R.drawable.ic_menu_white_24dp)
+        }, 340, 470, onBack = { showCurrentSearchPanel() }, titleIcon = R.drawable.ic_menu_white_24dp)
     }
 
     private fun showSearchPanelLegacyCard() {
@@ -6788,7 +7003,7 @@ class OverlayService : Service() {
             content.addView(status)
 
             val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            actions.addView(button("取消") { showAggSearchDialog(currentSearchMode) }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
+            actions.addView(button("取消") { showCurrentSearchPanel() }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
             actions.addView(button("应用") {
                 val from = parseAggAddress(fromInput.text.toString())
                 val to = parseAggAddress(toInput.text.toString())
@@ -6807,7 +7022,7 @@ class OverlayService : Service() {
                         resetSearchSession()
                     }
                     handler.post {
-                        if (ok) showAggSearchDialog(currentSearchMode)
+                        if (ok) showCurrentSearchPanel()
                         else {
                             status.text = "范围内没有可搜索的内存"
                             status.setTextColor(Color.parseColor("#FFB4AB"))
@@ -6816,7 +7031,7 @@ class OverlayService : Service() {
                 }.start()
             }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(3) })
             content.addView(actions)
-        }, 390, 330, onBack = { showAggSearchDialog(currentSearchMode) }, titleIcon = R.drawable.ic_agg_memory)
+        }, 390, 330, onBack = { showCurrentSearchPanel() }, titleIcon = R.drawable.ic_agg_memory)
     }
 
     private fun showAggRegionCategoriesPanel(fromText: String, toText: String) {
