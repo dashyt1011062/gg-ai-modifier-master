@@ -1365,7 +1365,7 @@ class OverlayService : Service() {
             content.addView(LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 addView(portInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                addView(Space(this@OverlayService), LinearLayout.LayoutParams(dp(4), 1))
+                addView(android.widget.Space(this@OverlayService), LinearLayout.LayoutParams(dp(4), 1))
                 addView(landInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             })
             content.addView(TextView(this).apply {
@@ -2756,7 +2756,6 @@ class OverlayService : Service() {
                 }, LinearLayout.LayoutParams(dp(48), dp(48)))
 
                 val values = AggWrapLayout(this).apply {
-                    gravity = Gravity.CENTER_VERTICAL
                     minimumHeight = dp(48)
                 }
                 values.addView(TextView(this).apply {
@@ -2917,7 +2916,6 @@ class OverlayService : Service() {
                         }, LinearLayout.LayoutParams(dp(48), dp(48)))
 
                         val values = AggWrapLayout(this).apply {
-                            gravity = Gravity.CENTER_VERTICAL
                             minimumHeight = dp(48)
                         }
                         values.addView(ImageView(this).apply {
@@ -4572,6 +4570,7 @@ class OverlayService : Service() {
         initialAddress: Long = memoryEditorAddress,
         initialType: String = memoryEditorType,
     ) {
+        val prefs = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
         val attachedPid = MemoryEngine.getAttachedPid()
         if (attachedPid == null || !MemoryEngine.isAttachedProcessAlive()) {
             showProcessPanel()
@@ -5582,7 +5581,7 @@ class OverlayService : Service() {
                             }
                         }
                     }, LinearLayout.LayoutParams(dp(48), dp(48)))
-                    val wrap = AggWrapLayout(this).apply { minimumHeight = dp(48); gravity = Gravity.CENTER_VERTICAL }
+                    val wrap = AggWrapLayout(this).apply { minimumHeight = dp(48) }
                     wrap.addView(TextView(this).apply {
                         text = item.label.ifBlank { addressText }
                         setTextColor(Color.WHITE)
@@ -10903,6 +10902,15 @@ mainMenu()""",
                     maxLines = 1
                 })
             }
+        }
+    }
+
+    private fun divider(horizontal: Boolean = true): View = View(this).apply {
+        setBackgroundColor(Color.argb(52, 255, 255, 255))
+        layoutParams = if (horizontal) {
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
+        } else {
+            LinearLayout.LayoutParams(dp(1), LinearLayout.LayoutParams.MATCH_PARENT)
         }
     }
 
