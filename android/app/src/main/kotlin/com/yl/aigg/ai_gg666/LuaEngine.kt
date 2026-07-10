@@ -211,7 +211,7 @@ object LuaEngine {
         return when (value) {
             null -> LuaValue.NIL
             is Float, is Double -> LuaValue.valueOf((value as Number).toDouble())
-            is Number -> LuaValue.valueOf(value.toLong())
+            is Number -> LuaValue.valueOf(value.toDouble())
             is Boolean -> LuaValue.valueOf(value)
             else -> LuaValue.valueOf(value.toString())
         }
@@ -453,7 +453,7 @@ object LuaEngine {
                     val type = luaTypeToDataType(if (flagsValue.isnil()) 4 else flagsValue.toint())
                     val value = MemoryEngine.readMemory(address, type) ?: continue
                     val item = LuaTable()
-                    item.set("address", LuaValue.valueOf(address))
+                    item.set("address", LuaValue.valueOf(address.toDouble()))
                     item.set("flags", LuaValue.valueOf(dataTypeToLuaType(type)))
                     item.set("value", luaValueOf(value))
                     item.set("freeze", LuaValue.valueOf(MemoryFreezer.isFrozen(address)))
