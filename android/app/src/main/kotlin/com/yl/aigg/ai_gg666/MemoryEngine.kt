@@ -40,6 +40,8 @@ object MemoryEngine {
         "other" to "其他可写区域",
     )
     private var selectedRegionCategories: Set<String> = regionCategoryLabels.keys.toSet()
+    private var customRangeFrom: Long? = null
+    private var customRangeTo: Long? = null
 
     init {
         try {
@@ -290,6 +292,14 @@ object MemoryEngine {
             val category = classifyRegion(name)
             if (applySelection && category !in selectedRegionCategories) continue
 
+            var clippedStart = startAddr
+            var clippedEnd = endAddr
+            if (applySelection) {
+                customRangeFrom?.let { clippedStart = maxOf(clippedStart, it) }
+                customRangeTo?.let { clippedEnd = minOf(clippedEnd, it) }
+                if (clippedEnd <= clippedStart) continue
+            }
+
             var priority = 30
             when (category) {
                 "heap" -> priority += 70
@@ -301,7 +311,7 @@ object MemoryEngine {
             }
             if (permissions.contains('x')) priority += 5
 
-            regions.add(MemRegion(startAddr, endAddr, priority, permissions, name, category))
+            regions.add(MemRegion(clippedStart, clippedEnd, priority, permissions, name, category))
         }
 
         return regions.sortedWith(compareByDescending<MemRegion> { it.priority }.thenBy { it.startAddr })
@@ -310,6 +320,35 @@ object MemoryEngine {
     private fun getRegions(pid: Int): List<MemRegion> = readRegions(pid, applySelection = true)
 
     fun getSelectedRegionCategories(): Set<String> = selectedRegionCategories.toSet()
+
+    fun getCustomRange(): Pair<Long?, Long?> = customRangeFrom to customRangeTo
+
+    @Synchronized
+    fun setCustomRange(from: Long?, to: Long?): Boolean {
+        if (from != null && from < 0L) return false
+        if (to != null && to <= 0L) return false
+        if (from != null && to != null && to <= from) return false
+        val previousFrom = customRangeFrom
+        val previousTo = customRangeTo
+        customRangeFrom = from
+        customRangeTo = to
+        val pid = attachedPid
+        if (pid != null) {
+            val filtered = getRegions(pid)
+            if (filtered.isEmpty()) {
+                customRangeFrom = previousFrom
+                customRangeTo = previousTo
+                activeRegions = getRegions(pid)
+                return false
+            }
+            activeRegions = filtered
+            resetSearchState()
+        }
+        return true
+    }
+
+    @Synchronized
+    fun clearCustomRange(): Boolean = setCustomRange(null, null)
 
     fun getRegionCategorySummary(): List<Map<String, Any>> {
         val pid = attachedPid ?: return regionCategoryLabels.map { (id, label) ->
