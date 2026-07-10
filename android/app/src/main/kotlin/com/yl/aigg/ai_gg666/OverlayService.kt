@@ -47,6 +47,42 @@ class OverlayService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val SEARCH_RESULT_PAGE_SIZE = 50
         var isRunning = false
+        @Volatile private var activeInstance: OverlayService? = null
+        @Volatile private var uiButtonClicked = false
+
+        fun setLuaPanelVisible(visible: Boolean) {
+            val service = activeInstance ?: return
+            service.handler.post {
+                if (visible) service.showLastOrMainMenu() else service.closePanel()
+            }
+        }
+
+        fun isLuaPanelVisible(): Boolean = activeInstance?.panel != null
+
+        fun setLuaButtonVisible(visible: Boolean) {
+            val service = activeInstance ?: return
+            service.handler.post {
+                if (service.ballView == null && visible) service.createBall()
+                service.ballView?.visibility = if (visible) View.VISIBLE else View.GONE
+            }
+        }
+
+        fun isLuaButtonVisible(): Boolean = activeInstance?.ballView?.visibility == View.VISIBLE
+
+        fun consumeLuaButtonClick(): Boolean {
+            val clicked = uiButtonClicked
+            uiButtonClicked = false
+            return clicked
+        }
+
+        fun luaGotoAddress(address: Long) {
+            if (address <= 0L) return
+            val service = activeInstance ?: return
+            service.handler.post {
+                service.memoryEditorAddress = address
+                service.showMemoryEditorPanel(address, service.memoryEditorType)
+            }
+        }
     }
 
     private var wm: WindowManager? = null
@@ -97,6 +133,7 @@ class OverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         isRunning = true
+        activeInstance = this
         MemoryEngine.setContext(applicationContext)
         LuaEngine.setContext(this)
         val prefs = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
@@ -112,6 +149,7 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        if (activeInstance === this) activeInstance = null
         removeBall()
         super.onDestroy()
     }
@@ -191,6 +229,7 @@ class OverlayService : Service() {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!dragging) {
+                        uiButtonClicked = true
                         showMainMenu()
                     } else {
                         val maxX = (resources.displayMetrics.widthPixels - dp(40)).coerceAtLeast(0)

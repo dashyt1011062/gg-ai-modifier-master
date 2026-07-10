@@ -49,6 +49,10 @@ object LuaEngine {
             val gg = LuaTable()
             registerGgApi(gg)
             globals.set("gg", gg)
+            val agg = LuaTable()
+            registerAggApi(agg)
+            globals.set("agg", agg)
+            globals.set("AGG", agg)
             val chunk = globals.load(scriptContent)
             chunk.call()
             return outputLog.toString()
@@ -105,6 +109,39 @@ object LuaEngine {
 
         latch.await()
         return selectedIndex.get()
+    }
+
+    private fun showMultiChoiceDialog(title: String, items: List<String>, initial: BooleanArray): BooleanArray? {
+        val latch = CountDownLatch(1)
+        val result = AtomicReference<BooleanArray?>(null)
+        val ctx = context ?: return null
+        val checked = BooleanArray(items.size) { index -> initial.getOrElse(index) { false } }
+        mainHandler.post {
+            try {
+                val dialog = AlertDialog.Builder(ctx)
+                    .setTitle(title)
+                    .setMultiChoiceItems(items.toTypedArray(), checked) { _, which, value ->
+                        if (which in checked.indices) checked[which] = value
+                    }
+                    .setPositiveButton("确定") { _, _ ->
+                        result.set(checked.copyOf())
+                        latch.countDown()
+                    }
+                    .setNegativeButton("取消") { _, _ ->
+                        result.set(null)
+                        latch.countDown()
+                    }
+                    .setCancelable(false)
+                    .create()
+                showDialog(dialog)
+            } catch (e: Exception) {
+                outputLog.appendLine("⚠️ 多选框显示失败: ${e.message}")
+                result.set(null)
+                latch.countDown()
+            }
+        }
+        latch.await()
+        return result.get()
     }
 
     private fun showInputDialog(title: String, defaultValue: String): String {
@@ -216,6 +253,26 @@ object LuaEngine {
             is Boolean -> LuaValue.valueOf(value)
             else -> LuaValue.valueOf(value.toString())
         }
+    }
+
+    private fun resultToLuaTable(source: Map<String, Any?>): LuaTable {
+        val item = LuaTable()
+        val address = (source["addressInt"] as? Number)?.toLong()
+            ?: (source["address"] as? Number)?.toLong()
+            ?: source["address"]?.toString()?.removePrefix("0x")?.removePrefix("0X")?.toLongOrNull(16)
+            ?: 0L
+        val type = source["type"]?.toString() ?: "dword"
+        item.set("address", luaValueOf(address))
+        item.set("value", luaValueOf(source["value"]))
+        item.set("flags", LuaValue.valueOf(dataTypeToLuaType(type)))
+        source["name"]?.let { item.set("name", luaValueOf(it)) }
+        source["freeze"]?.let { item.set("freeze", luaValueOf(it)) }
+        source["freezeType"]?.let { item.set("freezeType", luaValueOf(it)) }
+        source["freezeFrom"]?.let { item.set("freezeFrom", luaValueOf(it)) }
+        source["freezeTo"]?.let { item.set("freezeTo", luaValueOf(it)) }
+        source["pointerOffset"]?.let { item.set("offset", luaValueOf(it)) }
+        source["pointerTarget"]?.let { item.set("target", luaValueOf(it)) }
+        return item
     }
 
     private fun parseLuaMemoryValue(value: LuaValue, type: String): Any? {
@@ -397,6 +454,167 @@ object LuaEngine {
         }
     }
 
+    private fun compareVersionStrings(current: String, required: String): Int {
+        val a = current.split(Regex("[^0-9]+")).filter { it.isNotEmpty() }.map { it.toIntOrNull() ?: 0 }
+        val b = required.split(Regex("[^0-9]+")).filter { it.isNotEmpty() }.map { it.toIntOrNull() ?: 0 }
+        val size = maxOf(a.size, b.size)
+        for (index in 0 until size) {
+            val left = a.getOrElse(index) { 0 }
+            val right = b.getOrElse(index) { 0 }
+            if (left != right) return left.compareTo(right)
+        }
+        return 0
+    }
+
+    private fun registerAggApi(agg: LuaTable) {
+        agg.set("notification", object : TwoArgFunction() {
+            override fun call(arg1: LuaValue, arg2: LuaValue): LuaValue {
+                val ctx = context ?: return LuaValue.FALSE
+                return try {
+                    val manager = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                    val channelId = "agg_script_notifications"
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        manager.createNotificationChannel(
+                            android.app.NotificationChannel(channelId, "AGG 脚本通知", android.app.NotificationManager.IMPORTANCE_DEFAULT)
+                        )
+                    }
+                    @Suppress("DEPRECATION")
+                    val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        android.app.Notification.Builder(ctx, channelId)
+                    } else {
+                        android.app.Notification.Builder(ctx)
+                    }
+                    val notification = builder
+                        .setSmallIcon(android.R.drawable.ic_dialog_info)
+                        .setContentTitle(arg1.tojstring())
+                        .setContentText(arg2.tojstring())
+                        .setAutoCancel(true)
+                        .build()
+                    manager.notify((System.currentTimeMillis() and 0x7FFFFFFF).toInt(), notification)
+                    LuaValue.TRUE
+                } catch (e: Exception) {
+                    LuaValue.valueOf("notification failed: ${e.message}")
+                }
+            }
+        })
+
+        agg.set("isVPN", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                val ctx = context ?: return LuaValue.FALSE
+                val active = try {
+                    val manager = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                    val network = manager.activeNetwork ?: return LuaValue.FALSE
+                    manager.getNetworkCapabilities(network)?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true
+                } catch (_: Exception) {
+                    false
+                }
+                return LuaValue.valueOf(active)
+            }
+        })
+
+        agg.set("getProcessInfo", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                val ctx = context ?: return LuaTable()
+                val includeSystem = arg.toboolean()
+                val processes = ProcessManager.getProcessList(ctx).filter { includeSystem || it["isSystem"] != true }
+                return LuaTable().apply {
+                    processes.forEachIndexed { index, process ->
+                        val item = LuaTable()
+                        item.set("pid", luaValueOf(process["pid"]))
+                        item.set("packageName", luaValueOf(process["packageName"]))
+                        item.set("processName", luaValueOf(process["processName"]))
+                        item.set("rawProcessName", luaValueOf(process["rawProcessName"]))
+                        item.set("uid", luaValueOf(process["uid"]))
+                        item.set("isSystem", luaValueOf(process["isSystem"]))
+                        set(index + 1, item)
+                    }
+                }
+            }
+        })
+
+        agg.set("setProcessInfo", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                val ctx = context ?: return LuaValue.FALSE
+                val query = arg.tojstring().trim()
+                val process = ProcessManager.getProcessList(ctx).firstOrNull { item ->
+                    item["packageName"]?.toString() == query ||
+                        item["rawProcessName"]?.toString() == query ||
+                        item["processName"]?.toString() == query
+                } ?: return LuaValue.valueOf("process not found: $query")
+                val pid = (process["pid"] as? Number)?.toInt() ?: return LuaValue.FALSE
+                val success = MemoryEngine.attachProcess(pid)
+                if (success) {
+                    ctx.getSharedPreferences("gg_overlay", Context.MODE_PRIVATE).edit()
+                        .putInt("attached_pid", pid)
+                        .putString("attached_package", process["packageName"]?.toString() ?: query)
+                        .putString("attached_name", process["processName"]?.toString() ?: query)
+                        .putLong("attached_time", System.currentTimeMillis())
+                        .apply()
+                }
+                return LuaValue.valueOf(success)
+            }
+        })
+
+        agg.set("getHot", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                val raw = RootManager.executeRootCommand(
+                    "for f in /sys/class/thermal/thermal_zone*/temp; do [ -r \"\$f\" ] && echo \"\$f|\$(cat \"\$f\" 2>/dev/null)\"; done"
+                ).orEmpty()
+                val output = LuaTable()
+                var index = 1
+                for (line in raw.lines()) {
+                    val parts = line.split('|', limit = 2)
+                    if (parts.size != 2) continue
+                    val value = parts[1].trim().toDoubleOrNull() ?: continue
+                    val celsius = if (value > 1000.0) value / 1000.0 else value
+                    val item = LuaTable()
+                    item.set("path", LuaValue.valueOf(parts[0]))
+                    item.set("value", LuaValue.valueOf(celsius))
+                    output.set(index++, item)
+                }
+                return output
+            }
+        })
+
+        agg.set("getWM", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                val ctx = context ?: return LuaTable()
+                val metrics = ctx.resources.displayMetrics
+                val config = ctx.resources.configuration
+                return LuaTable().apply {
+                    set("width", LuaValue.valueOf(metrics.widthPixels))
+                    set("height", LuaValue.valueOf(metrics.heightPixels))
+                    set("density", LuaValue.valueOf(metrics.density.toDouble()))
+                    set("densityDpi", LuaValue.valueOf(metrics.densityDpi))
+                    set("orientation", LuaValue.valueOf(config.orientation))
+                }
+            }
+        })
+
+        agg.set("getClassMethods", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                return try {
+                    val methods = Class.forName(arg.tojstring()).declaredMethods
+                    LuaTable().apply {
+                        methods.forEachIndexed { index, method -> set(index + 1, LuaValue.valueOf(method.toGenericString())) }
+                    }
+                } catch (e: Exception) {
+                    LuaValue.valueOf("class lookup failed: ${e.message}")
+                }
+            }
+        })
+
+        agg.set("isTabVisible", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue = LuaValue.valueOf(OverlayService.isLuaPanelVisible())
+        })
+        agg.set("setTabVisible", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                OverlayService.setLuaPanelVisible(arg.toboolean())
+                return LuaValue.TRUE
+            }
+        })
+    }
+
     private fun registerGgApi(gg: LuaTable) {
         // gg.toast
         gg.set("toast", object : OneArgFunction() {
@@ -467,6 +685,111 @@ object LuaEngine {
             }
         })
 
+        // gg.multiChoice
+        gg.set("multiChoice", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                if (!args.arg(1).istable()) return LuaValue.NIL
+                val source = args.arg(1).checktable()
+                val items = (1..source.length()).map { source.get(it).tojstring() }
+                if (items.isEmpty()) return LuaValue.NIL
+                val initial = BooleanArray(items.size)
+                if (args.narg() >= 2 && args.arg(2).istable()) {
+                    val selected = args.arg(2).checktable()
+                    for (index in initial.indices) initial[index] = selected.get(index + 1).toboolean()
+                }
+                val title = if (args.narg() >= 3 && !args.arg(3).isnil()) args.arg(3).tojstring() else "选择"
+                val checked = showMultiChoiceDialog(title, items, initial) ?: return LuaValue.NIL
+                val output = LuaTable()
+                for (index in checked.indices) if (checked[index]) output.set(index + 1, LuaValue.TRUE)
+                return output
+            }
+        })
+
+        // gg.bytes / gg.copyText
+        gg.set("bytes", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                val text = args.arg(1).tojstring()
+                val encoding = if (args.narg() >= 2 && !args.arg(2).isnil()) args.arg(2).tojstring() else "UTF-8"
+                return try {
+                    val data = text.toByteArray(java.nio.charset.Charset.forName(encoding))
+                    LuaTable().apply {
+                        data.forEachIndexed { index, byte -> set(index + 1, LuaValue.valueOf(byte.toInt() and 0xFF)) }
+                    }
+                } catch (_: Exception) {
+                    LuaValue.valueOf("unsupported encoding: $encoding")
+                }
+            }
+        })
+        gg.set("copyText", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                val text = args.arg(1).tojstring()
+                val ctx = context ?: return LuaValue.NIL
+                mainHandler.post {
+                    val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                    clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("GG-AI", text))
+                }
+                return LuaValue.NIL
+            }
+        })
+
+        // gg.makeRequest
+        gg.set("makeRequest", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                val rawUrl = args.arg(1).tojstring().trim()
+                if (!rawUrl.startsWith("https://") && !rawUrl.startsWith("http://")) {
+                    return LuaValue.valueOf("only http and https URLs are supported")
+                }
+                return try {
+                    val connection = java.net.URL(rawUrl).openConnection() as java.net.HttpURLConnection
+                    connection.connectTimeout = 15000
+                    connection.readTimeout = 20000
+                    connection.instanceFollowRedirects = true
+                    connection.setRequestProperty("User-Agent", "GG-AI-Modifier/1.0")
+                    if (args.narg() >= 2 && args.arg(2).istable()) {
+                        val headers = args.arg(2).checktable()
+                        var key = LuaValue.NIL
+                        while (true) {
+                            val next = headers.next(key)
+                            key = next.arg1()
+                            if (key.isnil()) break
+                            connection.setRequestProperty(key.tojstring(), next.arg(2).tojstring())
+                        }
+                    }
+                    if (args.narg() >= 3 && !args.arg(3).isnil()) {
+                        val data = args.arg(3).tojstring().toByteArray(Charsets.UTF_8)
+                        connection.requestMethod = "POST"
+                        connection.doOutput = true
+                        connection.setRequestProperty("Content-Length", data.size.toString())
+                        connection.outputStream.use { it.write(data) }
+                    }
+                    val code = connection.responseCode
+                    val source = if (code in 200..399) connection.inputStream else connection.errorStream
+                    val buffer = ByteArray(8192)
+                    val output = java.io.ByteArrayOutputStream()
+                    if (source != null) source.use { input ->
+                        while (output.size() < 4 * 1024 * 1024) {
+                            val read = input.read(buffer, 0, minOf(buffer.size, 4 * 1024 * 1024 - output.size()))
+                            if (read <= 0) break
+                            output.write(buffer, 0, read)
+                        }
+                    }
+                    val response = LuaTable()
+                    response.set("code", LuaValue.valueOf(code))
+                    response.set("content", LuaValue.valueOf(output.toString(Charsets.UTF_8.name())))
+                    response.set("url", LuaValue.valueOf(connection.url.toString()))
+                    val responseHeaders = LuaTable()
+                    connection.headerFields.filterKeys { it != null }.forEach { (name, values) ->
+                        responseHeaders.set(name, LuaValue.valueOf(values.joinToString(", ")))
+                    }
+                    response.set("headers", responseHeaders)
+                    connection.disconnect()
+                    response
+                } catch (e: Exception) {
+                    LuaValue.valueOf("request failed: ${e.message}")
+                }
+            }
+        })
+
         // gg.searchNumber
         gg.set("searchNumber", object : TwoArgFunction() {
             override fun call(arg1: LuaValue, arg2: LuaValue): LuaValue {
@@ -507,20 +830,70 @@ object LuaEngine {
         gg.set("getResultCount", getResultsCountFunc)
 
         // gg.getResults
-        gg.set("getResults", object : OneArgFunction() {
-            override fun call(arg: LuaValue): LuaValue {
-                val count = arg.toint()
-                val table = LuaTable()
-                val takeCount = minOf(count, searchResults.size)
-                for (i in 0 until takeCount) {
-                    val result = searchResults[i]
-                    val item = LuaTable()
-                    item.set("address", LuaValue.valueOf(result["address"] as String))
-                    item.set("value", LuaValue.valueOf((result["value"] as? Number)?.toDouble() ?: 0.0))
-                    item.set("flags", LuaValue.valueOf(dataTypeToLuaType(result["type"] as String)))
-                    table.set(i + 1, item)
+        gg.set("getResults", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                val maxCount = args.arg(1).toint().coerceAtLeast(0)
+                val skip = if (args.narg() >= 2 && !args.arg(2).isnil()) args.arg(2).toint().coerceAtLeast(0) else 0
+                val addressMin = if (args.narg() >= 3 && !args.arg(3).isnil()) args.arg(3).tolong() else Long.MIN_VALUE
+                val addressMax = if (args.narg() >= 4 && !args.arg(4).isnil()) args.arg(4).tolong() else Long.MAX_VALUE
+                val valueMin = if (args.narg() >= 5 && !args.arg(5).isnil()) args.arg(5).tojstring().toDoubleOrNull() else null
+                val valueMax = if (args.narg() >= 6 && !args.arg(6).isnil()) args.arg(6).tojstring().toDoubleOrNull() else null
+                val typeFlag = if (args.narg() >= 7 && !args.arg(7).isnil()) args.arg(7).toint() else 0
+                val pointerFilter = if (args.narg() >= 9 && !args.arg(9).isnil()) args.arg(9).toint() else 0
+                val filtered = searchResults.asSequence().filter { result ->
+                    val address = (result["addressInt"] as? Number)?.toLong()
+                        ?: result["address"]?.toString()?.removePrefix("0x")?.removePrefix("0X")?.toLongOrNull(16)
+                        ?: return@filter false
+                    if (address !in addressMin..addressMax) return@filter false
+                    if (typeFlag != 0 && dataTypeToLuaType(result["type"]?.toString() ?: "dword") != typeFlag) return@filter false
+                    val number = (result["value"] as? Number)?.toDouble() ?: result["value"]?.toString()?.toDoubleOrNull()
+                    if (valueMin != null && (number == null || number < valueMin)) return@filter false
+                    if (valueMax != null && (number == null || number > valueMax)) return@filter false
+                    if (pointerFilter != 0 && result["pointerOffset"] == null) return@filter false
+                    true
+                }.drop(skip).let { sequence -> if (maxCount == 0) sequence else sequence.take(maxCount) }.toList()
+                return LuaTable().apply {
+                    filtered.forEachIndexed { index, result -> set(index + 1, resultToLuaTable(result)) }
                 }
-                return table
+            }
+        })
+
+        // gg.removeResults
+        gg.set("removeResults", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                if (!arg.istable()) return LuaValue.valueOf("results must be a table")
+                val input = arg.checktable()
+                val addresses = mutableSetOf<Long>()
+                for (index in 1..input.length()) {
+                    val source = input.get(index)
+                    val value = if (source.istable()) source.checktable().get("address") else source
+                    parseLuaAddress(value)?.let { addresses.add(it) }
+                }
+                searchResults.removeAll { result ->
+                    val address = (result["addressInt"] as? Number)?.toLong()
+                        ?: result["address"]?.toString()?.removePrefix("0x")?.removePrefix("0X")?.toLongOrNull(16)
+                    address != null && address in addresses
+                }
+                return LuaValue.TRUE
+            }
+        })
+
+        // No independent selection model exists inside a headless Lua run, so expose the active set.
+        gg.set("getSelectedResults", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue = LuaTable().apply {
+                searchResults.forEachIndexed { index, result -> set(index + 1, resultToLuaTable(result)) }
+            }
+        })
+        gg.set("getSelectedElements", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue = gg.get("getSelectedResults").call()
+        })
+        gg.set("getSelectedListItems", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                val targetKey = targetPackageKey()
+                val items = loadPersistentSavedList().filter { it["packageName"] == targetKey }
+                return LuaTable().apply {
+                    items.forEachIndexed { index, item -> set(index + 1, resultToLuaTable(item)) }
+                }
             }
         })
 
@@ -713,6 +1086,37 @@ object LuaEngine {
                     item.set("value", luaValueOf(value))
                     item.set("freeze", LuaValue.valueOf(MemoryFreezer.isFrozen(address)))
                     output.set(outputIndex++, item)
+                }
+                return output
+            }
+        })
+
+        // gg.getValuesRange
+        gg.set("getValuesRange", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                if (!arg.istable()) return LuaValue.valueOf("values must be a table")
+                val input = arg.checktable()
+                val regions = MemoryEngine.getMemoryRegions()
+                val output = LuaTable()
+                fun shortCode(category: String): String = when (category) {
+                    "heap" -> "Ch"
+                    "java" -> "Jh"
+                    "stack" -> "S"
+                    "app" -> "Xa"
+                    "system" -> "Xs"
+                    "anonymous" -> "A"
+                    else -> "O"
+                }
+                for (index in 1..input.length()) {
+                    val source = input.get(index)
+                    val addressValue = if (source.istable()) source.checktable().get("address") else source
+                    val address = parseLuaAddress(addressValue) ?: continue
+                    val region = regions.firstOrNull { item ->
+                        val start = (item["startAddress"] as? Number)?.toLong() ?: return@firstOrNull false
+                        val end = (item["endAddress"] as? Number)?.toLong() ?: return@firstOrNull false
+                        address in start until end
+                    }
+                    output.set(index, LuaValue.valueOf(shortCode(region?.get("category")?.toString() ?: "other")))
                 }
                 return output
             }
@@ -928,6 +1332,98 @@ object LuaEngine {
                 outputLog.appendLine("💾 已转储 $written 字节：${outputFile.absolutePath}")
                 return LuaValue.TRUE
             }
+        })
+
+        // Target, locale and UI compatibility helpers
+        gg.set("getTargetPackage", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                val pkg = context?.getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
+                    ?.getString("attached_package", "")
+                    ?.takeIf { it.isNotBlank() }
+                return pkg?.let { LuaValue.valueOf(it) } ?: LuaValue.NIL
+            }
+        })
+        gg.set("isPackageInstalled", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                val ctx = context ?: return LuaValue.FALSE
+                val installed = try {
+                    ctx.packageManager.getPackageInfo(arg.tojstring(), 0)
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+                return LuaValue.valueOf(installed)
+            }
+        })
+        gg.set("getLocale", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue = LuaValue.valueOf(java.util.Locale.getDefault().toString())
+        })
+        gg.set("numberFromLocale", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                val symbols = java.text.DecimalFormatSymbols.getInstance()
+                val fixed = arg.tojstring()
+                    .replace(symbols.groupingSeparator.toString(), "")
+                    .replace(symbols.decimalSeparator, '.')
+                return LuaValue.valueOf(fixed)
+            }
+        })
+        gg.set("numberToLocale", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                val symbols = java.text.DecimalFormatSymbols.getInstance()
+                val fixed = arg.tojstring().replace(",", "").replace('.', symbols.decimalSeparator)
+                return LuaValue.valueOf(fixed)
+            }
+        })
+        gg.set("setVisible", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                OverlayService.setLuaPanelVisible(arg.toboolean())
+                return LuaValue.NIL
+            }
+        })
+        gg.set("isVisible", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue = LuaValue.valueOf(OverlayService.isLuaPanelVisible())
+        })
+        gg.set("showUiButton", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                OverlayService.setLuaButtonVisible(true)
+                return LuaValue.NIL
+            }
+        })
+        gg.set("hideUiButton", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                OverlayService.setLuaButtonVisible(false)
+                return LuaValue.NIL
+            }
+        })
+        gg.set("isClickedUiButton", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                if (!OverlayService.isLuaButtonVisible()) return LuaValue.NIL
+                return LuaValue.valueOf(OverlayService.consumeLuaButtonClick())
+            }
+        })
+        gg.set("gotoAddress", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                parseLuaAddress(arg)?.let { OverlayService.luaGotoAddress(it) }
+                return LuaValue.NIL
+            }
+        })
+        gg.set("require", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                val ctx = context ?: return LuaValue.NIL
+                val info = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+                val currentVersion = info.versionName ?: "0"
+                @Suppress("DEPRECATION")
+                val currentBuild = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode.toLong()
+                val requiredVersion = if (!args.arg(1).isnil()) args.arg(1).tojstring() else ""
+                val requiredBuild = if (args.narg() >= 2 && !args.arg(2).isnil()) args.arg(2).tolong() else 0L
+                if ((requiredVersion.isNotEmpty() && compareVersionStrings(currentVersion, requiredVersion) < 0) || currentBuild < requiredBuild) {
+                    throw org.luaj.vm2.LuaError("GG-AI version $requiredVersion ($requiredBuild) or newer is required")
+                }
+                return LuaValue.NIL
+            }
+        })
+        gg.set("skipRestoreState", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue = LuaValue.NIL
         })
 
         // gg.getTargetInfo
