@@ -7,10 +7,8 @@ import android.content.pm.PackageManager
 /**
  * AGG 风格运行进程枚举。
  *
- * 分类规则与 AGG 的“进程过滤”含义保持一致：
- * - 系统应用进程：能映射到已安装 APK，且 ApplicationInfo 带系统应用标志。
- * - Linux 进程：无法映射到已安装 APK 的原生/守护进程。
- * - 应用子进程（package:remote）仍归属对应 APK，不视为 Linux 进程。
+ * 优先读取 ARGS/cmdline，避免部分 Android 设备的 NAME 字段截断包名，
+ * 导致应用被误判成 Linux 进程并被默认过滤。
  */
 object ProcessManager {
 
@@ -27,13 +25,24 @@ object ProcessManager {
         val pm = context.packageManager
         refreshAppCache(pm)
 
-        val primary = parsePsOutput(
+        // ARGS 一般能返回完整 argv[0]，NAME 在部分 toybox 版本上只保留 comm，可能被截断。
+        val argsProcesses = parsePsOutput(
+            context = context,
+            output = RootManager.executeRootCommand("ps -A -o PID,UID,ARGS 2>/dev/null"),
+            hasIdentityColumn = true,
+        )
+        val nameProcesses = parsePsOutput(
             context = context,
             output = RootManager.executeRootCommand("ps -A -o PID,UID,NAME 2>/dev/null"),
             hasIdentityColumn = true,
         )
-        val processes = if (primary.isNotEmpty()) primary else getProcessListFallback(context)
 
+        val merged = linkedMapOf<Int, Map<String, Any>>()
+        // NAME 先放，ARGS 后放，使完整 cmdline 覆盖截断名称。
+        nameProcesses.forEach { merged[it["pid"] as Int] = it }
+        argsProcesses.forEach { merged[it["pid"] as Int] = it }
+
+        val processes = if (merged.isNotEmpty()) merged.values.toList() else getProcessListFallback(context)
         return processes
             .distinctBy { it["pid"] as Int }
             .sortedWith(
@@ -42,6 +51,13 @@ object ProcessManager {
                         it["isLinux"] == true -> 2
                         it["isSystem"] == true -> 1
                         else -> 0
+                    }
+                }.thenBy {
+                    // 同一应用优先显示主进程，降低误附加到 :remote/:service 的概率。
+                    when {
+                        it["isMainProcess"] == true -> 0
+                        it["isChildProcess"] == true -> 1
+                        else -> 2
                     }
                 }.thenBy {
                     val name = it["processName"]?.toString().orEmpty()
@@ -68,6 +84,18 @@ object ProcessManager {
         }
     }
 
+    private fun resolveApp(rawProcessName: String): Pair<String, AppMeta>? {
+        val command = rawProcessName.substringBefore(' ').trim().trimEnd('\u0000')
+        val base = command.substringBefore(':')
+        appCache[base]?.let { return base to it }
+
+        // 兼容完整包名后带进程后缀，或部分 ps 输出附带额外 argv。
+        val packageName = appCache.keys.firstOrNull { candidate ->
+            command == candidate || command.startsWith("$candidate:")
+        } ?: return null
+        return packageName to (appCache[packageName] ?: return null)
+    }
+
     private fun parsePsOutput(
         context: Context,
         output: String?,
@@ -92,12 +120,15 @@ object ProcessManager {
                 .trimEnd('\u0000')
             if (rawProcessName.isBlank()) return@forEach
 
-            val baseName = rawProcessName.substringBefore(':')
-            if (baseName == context.packageName || rawProcessName == context.packageName) return@forEach
+            val resolved = resolveApp(rawProcessName)
+            val packageName = resolved?.first ?: rawProcessName.substringBefore(':')
+            if (packageName == context.packageName || rawProcessName == context.packageName) return@forEach
 
-            val meta = appCache[baseName]
+            val meta = resolved?.second
             val isLinux = meta == null
-            val suffix = rawProcessName.substringAfter(':', "")
+            val suffix = if (meta != null && rawProcessName.startsWith(meta.info.packageName)) {
+                rawProcessName.substringAfter(':', "")
+            } else ""
             val displayName = when {
                 meta == null -> rawProcessName
                 suffix.isBlank() -> meta.label
@@ -109,7 +140,7 @@ object ProcessManager {
                 "pid" to pid,
                 "uid" to uid,
                 "user" to identity,
-                "packageName" to if (meta == null) baseName else meta.info.packageName,
+                "packageName" to packageName,
                 "rawProcessName" to rawProcessName,
                 "processName" to displayName,
                 "appLabel" to (meta?.label ?: rawProcessName),
@@ -123,9 +154,7 @@ object ProcessManager {
         return processes
     }
 
-    /**
-     * 备用方案：直接遍历 /proc，同时读取 UID 和 cmdline。
-     */
+    /** 备用方案：直接遍历 /proc，同时读取 UID 和 cmdline。 */
     private fun getProcessListFallback(context: Context): List<Map<String, Any>> {
         val shellCommand = """
             for d in /proc/[0-9]*; do

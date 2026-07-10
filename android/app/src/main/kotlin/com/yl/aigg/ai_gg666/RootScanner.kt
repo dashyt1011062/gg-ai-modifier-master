@@ -3,6 +3,7 @@ package com.yl.aigg.ai_gg666
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -156,8 +157,22 @@ object RootScanner {
                 writer.write("\n")
                 writer.flush()
 
-                val response = reader.readLine() ?: return@withLock null
-                JSONObject(response)
+                // readLine() 在 scanner 启动失败或目标进程拒绝访问时可能永久阻塞。
+                // 读取/写入使用短超时，整段扫描允许更长时间；同时忽略 su 可能输出的非 JSON 行。
+                val timeoutMs = if (json.contains("\"cmd\":\"search_")) 120_000L else 6_000L
+                val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
+                while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                    if (!reader.ready()) {
+                        delay(10L)
+                        continue
+                    }
+                    val response = reader.readLine() ?: return@withLock null
+                    val parsed = runCatching { JSONObject(response) }.getOrNull()
+                    if (parsed != null) return@withLock parsed
+                    Log.w(TAG, "Ignoring non-JSON scanner output: ${response.take(160)}")
+                }
+                Log.e(TAG, "Scanner command timed out after ${timeoutMs}ms")
+                null
             } catch (e: Exception) {
                 Log.e(TAG, "sendCommand failed: ${e.message}", e)
                 null

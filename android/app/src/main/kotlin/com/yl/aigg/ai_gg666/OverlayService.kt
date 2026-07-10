@@ -114,6 +114,7 @@ class OverlayService : Service() {
     private var focusedSearchResultIndex = -1
     private var memoryEditorAddress = 0L
     private var memoryEditorType = "dword"
+    private var pendingProcessSelection: Map<String, Any>? = null
 
     private data class SavedMemoryItem(
         val address: Long,
@@ -1253,7 +1254,7 @@ class OverlayService : Service() {
         }, 390, 430, onBack = { aggMainTab = 4; showMainMenu() }, titleIcon = R.drawable.ic_dbg)
     }
 
-    private fun showAggProcessFilterPanel() {
+    private fun showAggProcessFilterPanel(returnToProcess: Boolean = false) {
         val prefs = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
         makeDraggablePanel("设置过滤应用", { content ->
             // 对齐 AGG 的 service_appdetector_item.xml：垂直布局、20dp 内边距、两个开关。
@@ -1290,7 +1291,9 @@ class OverlayService : Service() {
                 filterLinux,
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT),
             )
-        }, 360, 230, onBack = { aggMainTab = 0; showMainMenu() })
+        }, 360, 230, onBack = {
+            if (returnToProcess) showProcessPanel() else { aggMainTab = 0; showMainMenu() }
+        })
     }
 
     private fun showAggFreezeIntervalPanel() {
@@ -1445,84 +1448,226 @@ class OverlayService : Service() {
     private fun showAggResultFilterPanel() {
         val prefs = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
         makeDraggablePanel("搜索结果过滤", { content ->
-            fun input(hintText: String, initial: String): EditText = EditText(this).apply {
-                hint = hintText
+            content.setPadding(0, 0, 0, 0)
+            val body = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(20), dp(18), dp(20), dp(16))
+            }
+            val scroll = ScrollView(this).apply {
+                isFillViewport = true
+                addView(body)
+            }
+            content.addView(scroll, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            ))
+
+            fun field(initial: String, hintText: String): EditText = EditText(this).apply {
                 setText(initial)
+                hint = hintText
                 setSingleLine(true)
                 textSize = 10.5f
                 setTextColor(Color.WHITE)
-                setHintTextColor(Color.parseColor("#FFB8B8B8"))
-                setPadding(dp(9), 0, dp(9), 0)
-                background = aggMenuDrawable(Color.argb(35, 255, 255, 255), 4, Color.parseColor("#FFB8B8B8"))
-            }
-            fun labeledRow(labelText: String, view: View): LinearLayout = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(TextView(this@OverlayService).apply {
-                    text = labelText
-                    setTextColor(Color.WHITE)
-                    textSize = 10f
-                }, LinearLayout.LayoutParams(dp(74), dp(42)))
-                addView(view, LinearLayout.LayoutParams(0, dp(40), 1f))
+                setHintTextColor(Color.parseColor("#938F99"))
+                setPadding(dp(8), 0, dp(8), 0)
+                background = aggMenuDrawable(Color.argb(34, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
             }
 
-            val maxShow = input("最大显示数", prefs.getInt("agg_filter_max_show", 250).toString())
-            val keyword = input("地址、数值、类型或机器码", searchResultFilter)
-            val addrMin = input("最小地址", prefs.getString("agg_filter_addr_min", "") ?: "")
-            val addrMax = input("最大地址", prefs.getString("agg_filter_addr_max", "") ?: "")
-            val valueMin = input("最小数值", prefs.getString("agg_filter_value_min", "") ?: "")
-            val valueMax = input("最大数值", prefs.getString("agg_filter_value_max", "") ?: "")
+            fun divider(): View = View(this).apply {
+                setBackgroundColor(Color.parseColor("#C0FFFFFF"))
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(1),
+                ).apply {
+                    topMargin = dp(4)
+                    bottomMargin = dp(4)
+                }
+            }
+
+            fun toggleInputRow(
+                label: String,
+                initial: String,
+                hintText: String,
+            ): Pair<android.widget.CheckBox, EditText> {
+                val input = field(initial, hintText)
+                val check = android.widget.CheckBox(this).apply {
+                    text = label
+                    setTextColor(Color.WHITE)
+                    textSize = 10f
+                    gravity = Gravity.CENTER_VERTICAL
+                    isChecked = initial.isNotBlank()
+                    buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+                    setOnCheckedChangeListener { _, checked ->
+                        input.isEnabled = checked
+                        input.alpha = if (checked) 1f else 0.45f
+                    }
+                }
+                input.isEnabled = check.isChecked
+                input.alpha = if (check.isChecked) 1f else 0.45f
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(check, LinearLayout.LayoutParams(dp(92), dp(44)))
+                    addView(input, LinearLayout.LayoutParams(0, dp(40), 1f))
+                }
+                body.addView(row)
+                return check to input
+            }
+
+            val maxRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            maxRow.addView(TextView(this).apply {
+                text = "最大显示记录："
+                setTextColor(Color.WHITE)
+                textSize = 10f
+                gravity = Gravity.CENTER_VERTICAL
+            }, LinearLayout.LayoutParams(dp(108), dp(44)))
+            val maxShow = field(prefs.getInt("agg_filter_max_show", 250).toString(), "250").apply {
+                inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            }
+            maxRow.addView(maxShow, LinearLayout.LayoutParams(0, dp(40), 1f))
+            body.addView(maxRow)
+
+            val keywordRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            keywordRow.addView(TextView(this).apply {
+                text = "关键字："
+                setTextColor(Color.WHITE)
+                textSize = 10f
+                gravity = Gravity.CENTER_VERTICAL
+            }, LinearLayout.LayoutParams(dp(72), dp(44)))
+            val keyword = field(searchResultFilter, "地址、数值、类型或机器码")
+            keywordRow.addView(keyword, LinearLayout.LayoutParams(0, dp(40), 1f))
+            body.addView(keywordRow)
+            body.addView(divider())
+
+            val addrMinInitial = prefs.getString("agg_filter_addr_min", "") ?: ""
+            val addrMaxInitial = prefs.getString("agg_filter_addr_max", "") ?: ""
+            val (addrMinCheck, addrMin) = toggleInputRow("地址 ≥", addrMinInitial, "起始地址")
+            val (addrMaxCheck, addrMax) = toggleInputRow("地址 ≤", addrMaxInitial, "结束地址")
+            body.addView(divider())
+
+            val valueMinInitial = prefs.getString("agg_filter_value_min", "") ?: ""
+            val valueMaxInitial = prefs.getString("agg_filter_value_max", "") ?: ""
+            val (valueMinCheck, valueMin) = toggleInputRow("数值 ≥", valueMinInitial, "最小数值")
+            val (valueMaxCheck, valueMax) = toggleInputRow("数值 ≤", valueMaxInitial, "最大数值")
+            body.addView(divider())
+
             val types = arrayOf("全部", "dword", "float", "double", "word", "byte", "qword")
+            val storedType = prefs.getString("agg_filter_type", "全部") ?: "全部"
             val typeSpinner = Spinner(this).apply {
                 adapter = ArrayAdapter(this@OverlayService, android.R.layout.simple_spinner_item, types).apply {
                     setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
                 }
-                setSelection(types.indexOf(prefs.getString("agg_filter_type", "全部") ?: "全部").coerceAtLeast(0))
-                background = aggMenuDrawable(Color.argb(35, 255, 255, 255), 4, Color.parseColor("#FFB8B8B8"))
+                setSelection(types.indexOf(storedType).coerceAtLeast(0))
+                background = aggMenuDrawable(Color.argb(34, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
             }
+            val typeCheck = android.widget.CheckBox(this).apply {
+                text = "类型："
+                setTextColor(Color.WHITE)
+                textSize = 10f
+                isChecked = storedType != "全部"
+                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+                setOnCheckedChangeListener { _, checked ->
+                    typeSpinner.isEnabled = checked
+                    typeSpinner.alpha = if (checked) 1f else 0.45f
+                }
+            }
+            typeSpinner.isEnabled = typeCheck.isChecked
+            typeSpinner.alpha = if (typeCheck.isChecked) 1f else 0.45f
+            body.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(typeCheck, LinearLayout.LayoutParams(dp(92), dp(44)))
+                addView(typeSpinner, LinearLayout.LayoutParams(0, dp(40), 1f))
+            })
 
-            content.addView(labeledRow("最大显示", maxShow))
-            content.addView(labeledRow("关键字", keyword))
-            content.addView(labeledRow("地址 ≥", addrMin))
-            content.addView(labeledRow("地址 ≤", addrMax))
-            content.addView(labeledRow("数值 ≥", valueMin))
-            content.addView(labeledRow("数值 ≤", valueMax))
-            content.addView(labeledRow("类型", typeSpinner))
+            fun unsupportedChoice(label: String, summary: String): LinearLayout {
+                return LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    alpha = 0.48f
+                    addView(android.widget.CheckBox(this@OverlayService).apply {
+                        text = label
+                        setTextColor(Color.WHITE)
+                        textSize = 10f
+                        isEnabled = false
+                        buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+                    }, LinearLayout.LayoutParams(dp(92), dp(44)))
+                    addView(TextView(this@OverlayService).apply {
+                        text = summary
+                        setTextColor(Color.parseColor("#CAC4D0"))
+                        textSize = 9f
+                        gravity = Gravity.CENTER_VERTICAL
+                    }, LinearLayout.LayoutParams(0, dp(44), 1f))
+                }
+            }
+            body.addView(unsupportedChoice("{x}", "小数位过滤暂不可用"))
+            body.addView(unsupportedChoice("指针：", "指针权限过滤暂不可用"))
+            body.addView(divider())
 
             val showHex = android.widget.CheckBox(this).apply {
-                text = "显示十六进制解释"
+                text = "十六进制格式（little-endian）"
                 setTextColor(Color.WHITE)
                 textSize = 9.5f
                 isChecked = prefs.getBoolean("agg_show_hex", true)
                 buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
             }
-            val showMachine = android.widget.CheckBox(this).apply {
-                text = "显示机器码/指令字节"
+            val showReverseHex = android.widget.CheckBox(this).apply {
+                text = "反向十六进制格式（big-endian）"
+                setTextColor(Color.WHITE)
+                textSize = 9.5f
+                isEnabled = false
+                alpha = 0.48f
+                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            }
+            val showString = android.widget.CheckBox(this).apply {
+                text = "字符串表达式"
+                setTextColor(Color.WHITE)
+                textSize = 9.5f
+                isEnabled = false
+                alpha = 0.48f
+                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            }
+            val showJava = android.widget.CheckBox(this).apply {
+                text = "Java 字符串表达式"
+                setTextColor(Color.WHITE)
+                textSize = 9.5f
+                isEnabled = false
+                alpha = 0.48f
+                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            }
+            val showArm = android.widget.CheckBox(this).apply {
+                text = "ARM / Thumb / ARM8 操作码"
                 setTextColor(Color.WHITE)
                 textSize = 9.5f
                 isChecked = prefs.getBoolean("agg_show_machine", true)
                 buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
             }
-            val optionRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                addView(showHex, LinearLayout.LayoutParams(0, dp(42), 1f))
-                addView(showMachine, LinearLayout.LayoutParams(0, dp(42), 1f))
-            }
-            content.addView(optionRow)
+            body.addView(showHex, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)))
+            body.addView(showReverseHex, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)))
+            body.addView(showString, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)))
+            body.addView(showJava, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)))
+            body.addView(showArm, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)))
 
-            fun button(label: String, action: () -> Unit): TextView = TextView(this).apply {
+            fun actionButton(label: String, action: () -> Unit): TextView = TextView(this).apply {
                 text = label
                 gravity = Gravity.CENTER
                 setTextColor(Color.WHITE)
                 textSize = 10f
-                background = aggMenuDrawable(Color.argb(42, 255, 255, 255), 4, Color.parseColor("#FFB8B8B8"))
+                background = aggMenuDrawable(Color.argb(42, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
                 setOnClickListener { action() }
             }
             val actions = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
-                setPadding(0, dp(7), 0, 0)
+                setPadding(0, dp(8), 0, 0)
             }
-            actions.addView(button("清除") {
+            actions.addView(actionButton("清除") {
                 prefs.edit()
                     .remove("agg_filter_addr_min")
                     .remove("agg_filter_addr_max")
@@ -1530,29 +1675,31 @@ class OverlayService : Service() {
                     .remove("agg_filter_value_max")
                     .putInt("agg_filter_max_show", 250)
                     .putString("agg_filter_type", "全部")
+                    .putBoolean("agg_show_hex", true)
+                    .putBoolean("agg_show_machine", true)
                     .apply()
                 searchResultFilter = ""
                 aggMainTab = 1
                 showMainMenu()
-            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(3) })
-            actions.addView(button("应用") {
+            }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(3) })
+            actions.addView(actionButton("应用") {
                 val limit = maxShow.text.toString().toIntOrNull()?.coerceIn(1, 10000) ?: 250
                 prefs.edit()
                     .putInt("agg_filter_max_show", limit)
-                    .putString("agg_filter_addr_min", addrMin.text.toString().trim())
-                    .putString("agg_filter_addr_max", addrMax.text.toString().trim())
-                    .putString("agg_filter_value_min", valueMin.text.toString().trim())
-                    .putString("agg_filter_value_max", valueMax.text.toString().trim())
-                    .putString("agg_filter_type", types[typeSpinner.selectedItemPosition])
+                    .putString("agg_filter_addr_min", if (addrMinCheck.isChecked) addrMin.text.toString().trim() else "")
+                    .putString("agg_filter_addr_max", if (addrMaxCheck.isChecked) addrMax.text.toString().trim() else "")
+                    .putString("agg_filter_value_min", if (valueMinCheck.isChecked) valueMin.text.toString().trim() else "")
+                    .putString("agg_filter_value_max", if (valueMaxCheck.isChecked) valueMax.text.toString().trim() else "")
+                    .putString("agg_filter_type", if (typeCheck.isChecked) types[typeSpinner.selectedItemPosition] else "全部")
                     .putBoolean("agg_show_hex", showHex.isChecked)
-                    .putBoolean("agg_show_machine", showMachine.isChecked)
+                    .putBoolean("agg_show_machine", showArm.isChecked)
                     .apply()
                 searchResultFilter = keyword.text.toString().trim()
                 aggMainTab = 1
                 showMainMenu()
-            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3) })
-            content.addView(actions)
-        }, 390, 590, onBack = { aggMainTab = 1; showMainMenu() }, titleIcon = R.drawable.ic_tune_white_24dp)
+            }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(3) })
+            body.addView(actions)
+        }, 400, 620, onBack = { aggMainTab = 1; showMainMenu() }, titleIcon = R.drawable.ic_tune_white_24dp)
     }
 
     private fun showMainMenu() {
@@ -3589,112 +3736,174 @@ class OverlayService : Service() {
     private fun showProcessPanel() {
         saveLastPanel("process")
         makeDraggablePanel("选择进程", { content ->
+            content.setPadding(dp(8), dp(8), dp(8), dp(8))
             val attachedPid = MemoryEngine.getAttachedPid()
-            val status = TextView(this).apply {
-                text = if (attachedPid != null) "当前进程  PID $attachedPid" else "正在扫描运行中的应用…"
-                setTextColor(if (attachedPid != null) Color.parseColor("#C8F7DC") else Color.parseColor("#CAC4D0"))
-                textSize = 11f
-                setPadding(dp(8), dp(4), dp(8), dp(6))
+            if (pendingProcessSelection?.get("pid") != attachedPid) {
+                pendingProcessSelection = null
             }
-            content.addView(status)
 
+            val searchCard = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(8), dp(5), dp(8), dp(5))
+                background = aggMenuDrawable(Color.parseColor("#241F2A"), 10, Color.parseColor("#625B71"))
+            }
             val searchRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(4), 0, dp(4), dp(5))
             }
             val queryInput = EditText(this).apply {
-                hint = "搜索应用名或包名"
+                hint = "搜索"
                 setTextColor(Color.parseColor("#F3EDF7"))
                 setHintTextColor(Color.parseColor("#938F99"))
                 textSize = 12f
                 setSingleLine(true)
-                setPadding(dp(12), 0, dp(10), 0)
-                background = aggMenuDrawable(Color.parseColor("#25222B"), 10, Color.parseColor("#49454F"))
-                layoutParams = LinearLayout.LayoutParams(0, dp(40), 1f)
+                setPadding(dp(10), 0, dp(8), 0)
+                background = aggMenuDrawable(Color.parseColor("#1F1B24"), 8, Color.parseColor("#79747E"))
             }
-            searchRow.addView(queryInput)
-
-            val list = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(2), dp(2), dp(2), dp(2))
-            }
+            searchRow.addView(queryInput, LinearLayout.LayoutParams(0, dp(42), 1f))
             val searchButton = ImageView(this).apply {
                 setImageResource(R.drawable.ic_agg_search)
                 setColorFilter(Color.parseColor("#E8DEF8"))
                 setPadding(dp(10), dp(10), dp(10), dp(10))
-                background = aggMenuDrawable(Color.parseColor("#4A4458"), 10, Color.parseColor("#675F72"))
-                setOnClickListener { loadProcs(list, status, queryInput.text.toString()) }
+                background = aggMenuDrawable(Color.parseColor("#4A4458"), 9, Color.parseColor("#675F72"))
             }
-            searchRow.addView(searchButton, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(6) })
-            val refreshButton = ImageView(this).apply {
-                setImageResource(R.drawable.ic_agg_refresh)
-                setColorFilter(Color.parseColor("#E8DEF8"))
-                setPadding(dp(10), dp(10), dp(10), dp(10))
-                background = aggMenuDrawable(Color.parseColor("#34313A"), 10, Color.parseColor("#49454F"))
-                setOnClickListener { loadProcs(list, status, queryInput.text.toString()) }
-            }
-            searchRow.addView(refreshButton, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(5) })
-            content.addView(searchRow)
+            searchRow.addView(searchButton, LinearLayout.LayoutParams(dp(42), dp(42)).apply { marginStart = dp(6) })
+            searchCard.addView(searchRow)
 
+            val helper = TextView(this).apply {
+                text = if (attachedPid != null) "已选中[1]项 · 当前 PID $attachedPid" else "已选中[0]项"
+                setTextColor(Color.parseColor("#CAC4D0"))
+                textSize = 9.5f
+                setPadding(dp(3), dp(3), dp(3), 0)
+            }
+            searchCard.addView(helper)
+            content.addView(searchCard)
+
+            val status = TextView(this).apply {
+                text = "正在扫描运行进程…"
+                setTextColor(Color.parseColor("#CAC4D0"))
+                textSize = 10f
+                setPadding(dp(5), dp(5), dp(5), dp(4))
+            }
+            content.addView(status)
+
+            val list = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(2), 0, dp(4))
+            }
             val scroll = ScrollView(this).apply {
                 isFillViewport = true
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+                addView(list)
             }
-            scroll.addView(list)
-            content.addView(scroll)
+            content.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
             val footer = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(4), dp(5), dp(4), dp(1))
+                setPadding(dp(4), dp(5), dp(4), 0)
             }
-            footer.addView(TextView(this).apply {
+            val filterButton = TextView(this).apply {
+                text = "过滤"
+                gravity = Gravity.CENTER
+                setTextColor(Color.parseColor("#E8DEF8"))
+                textSize = 10f
+                background = aggMenuDrawable(Color.parseColor("#302D35"), 18, Color.parseColor("#49454F"))
+                setOnClickListener { showAggProcessFilterPanel(returnToProcess = true) }
+            }
+            footer.addView(filterButton, LinearLayout.LayoutParams(dp(62), dp(38)))
+            footer.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+            val detachButton = TextView(this).apply {
                 text = "分离"
                 gravity = Gravity.CENTER
                 setTextColor(Color.parseColor("#FFB4AB"))
                 textSize = 10f
-                background = aggMenuDrawable(Color.parseColor("#35232A"), 9, Color.parseColor("#68404A"))
+                background = aggMenuDrawable(Color.parseColor("#35232A"), 18, Color.parseColor("#68404A"))
                 setOnClickListener {
                     MemoryEngine.detachProcess()
                     clearAttachedProcessInfo()
+                    pendingProcessSelection = null
                     searchResults = emptyList()
                     selectedIndices.clear()
-                    status.text = "已分离进程"
-                    loadProcs(list, status, queryInput.text.toString())
+                    helper.text = "已选中[0]项"
+                    loadProcs(list, status, helper, queryInput.text.toString())
                 }
-            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginEnd = dp(3) })
-            footer.addView(TextView(this).apply {
-                text = "进程控制"
-                gravity = Gravity.CENTER
-                setTextColor(Color.parseColor("#E6E0E9"))
-                textSize = 10f
-                background = aggMenuDrawable(Color.parseColor("#302D35"), 9, Color.parseColor("#49454F"))
+            }
+            footer.addView(detachButton, LinearLayout.LayoutParams(dp(62), dp(38)).apply { marginEnd = dp(7) })
+            val confirmButton = ImageView(this).apply {
+                setImageResource(android.R.drawable.checkbox_on_background)
+                setColorFilter(Color.parseColor("#231A2E"))
+                setPadding(dp(12), dp(12), dp(12), dp(12))
+                background = aggMenuDrawable(Color.parseColor("#D0BCFF"), 24, Color.parseColor("#E8DEF8"))
+                contentDescription = "确认选择进程"
                 setOnClickListener {
-                    if (MemoryEngine.getAttachedPid() != null) showProcessControlPanel()
-                    else status.text = "请先选择一个运行中的应用"
+                    attachPendingProcess(status, helper)
                 }
-            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(3); marginEnd = dp(3) })
-            footer.addView(TextView(this).apply {
-                text = "进入搜索"
-                gravity = Gravity.CENTER
-                setTextColor(Color.parseColor("#231A2E"))
-                textSize = 11f
-                setTypeface(null, android.graphics.Typeface.BOLD)
-                background = aggMenuDrawable(Color.parseColor("#D0BCFF"), 9, Color.parseColor("#E8DEF8"))
-                setOnClickListener {
-                    if (MemoryEngine.getAttachedPid() != null) showAggSearchTab()
-                    else status.text = "请先选择一个运行中的应用"
-                }
-            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(3) })
+            }
+            footer.addView(confirmButton, LinearLayout.LayoutParams(dp(48), dp(48)))
             content.addView(footer)
 
-            loadProcs(list, status)
-        }, 360, 520, titleIcon = R.drawable.ic_agg_apps)
+            searchButton.setOnClickListener {
+                loadProcs(list, status, helper, queryInput.text.toString())
+            }
+            queryInput.setOnEditorActionListener { _, _, _ ->
+                loadProcs(list, status, helper, queryInput.text.toString())
+                true
+            }
+
+            loadProcs(list, status, helper)
+        }, 382, 548, titleIcon = R.drawable.ic_agg_apps)
     }
 
-    private fun loadProcs(list: LinearLayout, status: TextView, query: String = "") {
+    private fun attachPendingProcess(status: TextView, helper: TextView) {
+        val selected = pendingProcessSelection
+        if (selected == null) {
+            val currentPid = MemoryEngine.getAttachedPid()
+            if (currentPid != null) {
+                showAggSearchTab()
+            } else {
+                status.text = "请先在列表中选择一个进程"
+                status.setTextColor(Color.parseColor("#FFB4AB"))
+            }
+            return
+        }
+        val pid = selected["pid"] as? Int ?: return
+        val pkg = selected["packageName"]?.toString().orEmpty()
+        val name = selected["processName"]?.toString().orEmpty().ifBlank { pkg }
+        status.text = "正在附加 $name…"
+        status.setTextColor(Color.parseColor("#D0BCFF"))
+        Thread {
+            val ok = MemoryEngine.attachProcess(pid)
+            handler.post {
+                if (ok) {
+                    saveAttachedProcess(pid, pkg, name)
+                    searchResults = emptyList()
+                    selectedIndices.clear()
+                    savedSearchInput = ""
+                    savedFilterInput = ""
+                    savedRangeMin = ""
+                    savedRangeMax = ""
+                    helper.text = "已选中[1]项 · PID $pid · ${MemoryEngine.getIoModeLabel()}"
+                    status.text = "已附加 $name"
+                    status.setTextColor(Color.parseColor("#C8F7DC"))
+                    showAggSearchTab()
+                } else {
+                    clearAttachedProcessInfo()
+                    val reason = MemoryEngine.getAttachError().ifBlank { "请检查 Root 权限和进程状态" }
+                    status.text = "附加失败：$reason"
+                    status.setTextColor(Color.parseColor("#FFB4AB"))
+                }
+            }
+        }.start()
+    }
+
+    private fun loadProcs(
+        list: LinearLayout,
+        status: TextView,
+        helper: TextView,
+        query: String = "",
+    ) {
         status.text = "正在扫描运行进程…"
+        status.setTextColor(Color.parseColor("#CAC4D0"))
         list.removeAllViews()
         Thread {
             val keyword = query.trim().lowercase()
@@ -3710,7 +3919,6 @@ class OverlayService : Service() {
                 val isSystem = process["isSystem"] as? Boolean ?: false
                 val isLinux = process["isLinux"] as? Boolean ?: false
                 val uid = (process["uid"] as? Number)?.toInt()?.toString().orEmpty()
-
                 (!filterSystem || !isSystem) &&
                         (!filterLinux || !isLinux) &&
                         (keyword.isEmpty() || listOf(pkg, name, rawName, appLabel, uid).any {
@@ -3719,53 +3927,58 @@ class OverlayService : Service() {
             }
             handler.post {
                 val currentPid = MemoryEngine.getAttachedPid()
-                status.text = if (currentPid != null) {
-                    "${procs.size} 个进程  ·  当前 PID $currentPid"
-                } else {
-                    "找到 ${procs.size} 个运行进程"
+                val pendingPid = (pendingProcessSelection?.get("pid") as? Number)?.toInt()
+                helper.text = when {
+                    pendingPid != null -> "已选中[1]项 · PID $pendingPid"
+                    currentPid != null -> "已选中[1]项 · 当前 PID $currentPid"
+                    else -> "已选中[0]项"
                 }
-                status.setTextColor(if (currentPid != null) Color.parseColor("#C8F7DC") else Color.parseColor("#CAC4D0"))
+                status.text = "${procs.size} 个运行进程"
+                status.setTextColor(Color.parseColor("#CAC4D0"))
 
                 if (procs.isEmpty()) {
                     list.addView(TextView(this).apply {
-                        text = "没有找到匹配的运行进程"
+                        text = "没有找到匹配的运行进程\n可在“过滤”中关闭系统应用或 Linux 进程过滤"
                         gravity = Gravity.CENTER
                         setTextColor(Color.parseColor("#938F99"))
-                        textSize = 12f
+                        textSize = 11f
                         setPadding(dp(8), dp(34), dp(8), dp(34))
                     })
                     return@post
                 }
 
                 for (proc in procs) {
-                    val name = proc["processName"] as String
-                    val pkg = proc["packageName"] as String
+                    val name = proc["processName"]?.toString().orEmpty()
+                    val pkg = proc["packageName"]?.toString().orEmpty()
                     val rawName = proc["rawProcessName"]?.toString().orEmpty()
                     val pid = proc["pid"] as Int
                     val uid = (proc["uid"] as? Number)?.toInt() ?: -1
                     val isSystem = proc["isSystem"] as? Boolean ?: false
                     val isLinux = proc["isLinux"] as? Boolean ?: false
-                    val isAttached = currentPid == pid
+                    val isMain = proc["isMainProcess"] as? Boolean ?: false
+                    val isSelected = pendingPid == pid || (pendingPid == null && currentPid == pid)
 
-                    val item = LinearLayout(this).apply {
+                    val card = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
-                        setPadding(dp(8), dp(5), dp(7), dp(5))
+                        setPadding(dp(6), dp(6), dp(6), dp(6))
                         background = aggMenuDrawable(
-                            if (isAttached) Color.parseColor("#3B3346") else Color.parseColor("#242128"),
-                            8,
-                            if (isAttached) Color.parseColor("#B69DF8") else Color.parseColor("#343039")
+                            if (isSelected) Color.parseColor("#493E58") else Color.parseColor("#29252E"),
+                            10,
+                            if (isSelected) Color.parseColor("#D0BCFF") else Color.TRANSPARENT,
                         )
                         layoutParams = LinearLayout.LayoutParams(
                             LinearLayout.LayoutParams.MATCH_PARENT,
-                            dp(54)
-                        ).apply { bottomMargin = dp(4) }
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                        ).apply {
+                            marginStart = dp(12)
+                            marginEnd = dp(12)
+                            bottomMargin = dp(5)
+                        }
                     }
 
                     val icon = ImageView(this).apply {
                         scaleType = ImageView.ScaleType.CENTER_CROP
-                        background = aggMenuDrawable(Color.parseColor("#34313A"), 9, Color.parseColor("#49454F"))
-                        setPadding(dp(3), dp(3), dp(3), dp(3))
                         try {
                             setImageDrawable(packageManager.getApplicationIcon(pkg))
                         } catch (_: Exception) {
@@ -3773,88 +3986,68 @@ class OverlayService : Service() {
                             setColorFilter(Color.parseColor("#D0BCFF"))
                         }
                     }
-                    item.addView(icon, LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(9) })
+                    card.addView(icon, LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(6) })
 
-                    item.addView(LinearLayout(this).apply {
+                    val texts = LinearLayout(this).apply {
                         orientation = LinearLayout.VERTICAL
-                        gravity = Gravity.CENTER_VERTICAL
-                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
-                        addView(TextView(this@OverlayService).apply {
-                            text = name
-                            maxLines = 1
-                            ellipsize = android.text.TextUtils.TruncateAt.END
-                            setTextColor(Color.parseColor("#F3EDF7"))
-                            textSize = 12.5f
-                            setTypeface(null, if (isAttached) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-                        })
-                        addView(TextView(this@OverlayService).apply {
-                            text = buildString {
-                                append(
-                                    when {
-                                        isLinux -> "Linux"
-                                        isSystem -> "系统应用"
-                                        else -> "应用"
-                                    }
-                                )
-                                if (rawName.isNotBlank()) append(" · ").append(rawName)
-                                if (uid >= 0) append(" · UID ").append(uid)
-                            }
-                            maxLines = 1
-                            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-                            setTextColor(Color.parseColor("#CAC4D0"))
-                            textSize = 9.5f
-                            setPadding(0, dp(2), 0, 0)
-                        })
-                    })
-
-                    item.addView(TextView(this).apply {
-                        text = if (isAttached) "已附加\n$pid" else "PID\n$pid"
-                        gravity = Gravity.CENTER
-                        setTextColor(if (isAttached) Color.parseColor("#C8F7DC") else Color.parseColor("#CAC4D0"))
-                        textSize = 9.5f
-                        setTypeface(null, android.graphics.Typeface.BOLD)
-                        background = aggMenuDrawable(
-                            if (isAttached) Color.parseColor("#214B39") else Color.parseColor("#302D35"),
-                            8,
-                            if (isAttached) Color.parseColor("#3B7258") else Color.parseColor("#49454F")
-                        )
-                    }, LinearLayout.LayoutParams(dp(56), dp(38)).apply { marginStart = dp(7) })
-
-                    item.setOnClickListener {
-                        if (MemoryEngine.getAttachedPid() == pid) {
-                            showAggSearchTab()
-                            return@setOnClickListener
-                        }
-                        status.text = "正在附加 $name…"
-                        status.setTextColor(Color.parseColor("#D0BCFF"))
-                        Thread {
-                            val ok = MemoryEngine.attachProcess(pid)
-                            handler.post {
-                                if (ok) {
-                                    saveAttachedProcess(pid, pkg, name)
-                                    searchResults = emptyList()
-                                    selectedIndices.clear()
-                                    savedSearchInput = ""
-                                    savedFilterInput = ""
-                                    savedRangeMin = ""
-                                    savedRangeMax = ""
-                                    status.text = "已附加 $name  ·  PID $pid"
-                                    status.setTextColor(Color.parseColor("#C8F7DC"))
-                                    showAggSearchTab()
-                                } else {
-                                    clearAttachedProcessInfo()
-                                    status.text = "附加失败，请检查 Root 权限和进程状态"
-                                    status.setTextColor(Color.parseColor("#FFB4AB"))
-                                }
-                            }
-                        }.start()
+                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                     }
-                    list.addView(item)
+                    texts.addView(TextView(this).apply {
+                        text = name
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                        setTextColor(Color.parseColor("#F3EDF7"))
+                        textSize = 13f
+                    })
+                    texts.addView(TextView(this).apply {
+                        text = buildString {
+                            append(
+                                when {
+                                    isLinux -> "Linux进程"
+                                    isSystem -> "系统应用"
+                                    else -> "应用进程"
+                                }
+                            )
+                            if (isMain) append(" · 主进程")
+                            else if (rawName.contains(':')) append(" · 子进程")
+                            if (uid >= 0) append(" · UID ").append(uid)
+                        }
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                        setTextColor(Color.parseColor("#CAC4D0"))
+                        textSize = 10f
+                    })
+                    texts.addView(TextView(this).apply {
+                        text = rawName.ifBlank { pkg }
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                        setTextColor(Color.parseColor("#938F99"))
+                        textSize = 9f
+                    })
+                    card.addView(texts)
+                    card.addView(TextView(this).apply {
+                        text = "PID\n$pid"
+                        gravity = Gravity.CENTER
+                        setTextColor(if (isSelected) Color.parseColor("#EADDFF") else Color.parseColor("#CAC4D0"))
+                        textSize = 10f
+                    }, LinearLayout.LayoutParams(dp(54), LinearLayout.LayoutParams.WRAP_CONTENT))
+
+                    card.setOnClickListener {
+                        pendingProcessSelection = proc
+                        helper.text = "已选中[1]项 · PID $pid"
+                        loadProcs(list, status, helper, query)
+                    }
+                    card.setOnLongClickListener {
+                        pendingProcessSelection = proc
+                        attachPendingProcess(status, helper)
+                        true
+                    }
+                    list.addView(card)
                 }
             }
         }.start()
     }
-    
+
     // 保存附加的进程信息，供主应用读取
     private fun saveAttachedProcess(pid: Int, packageName: String, processName: String) {
         try {
@@ -5017,144 +5210,235 @@ class OverlayService : Service() {
         }
         saveLastPanel("agg_searcher")
         makeDraggablePanel("搜索", { content ->
-            content.setPadding(dp(14), dp(12), dp(14), dp(12))
-
-            val status = TextView(this).apply {
-                text = if (searchResults.isEmpty()) "请输入要搜索的数值" else "当前有 ${searchResults.size} 个结果，可继续筛选"
-                setTextColor(Color.parseColor("#F3EDF7"))
-                textSize = 12f
-                setPadding(0, 0, 0, dp(6))
+            content.setPadding(0, 0, 0, 0)
+            val scrollBody = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(20), dp(18), dp(20), dp(18))
             }
-            content.addView(status)
+            val scroll = ScrollView(this).apply {
+                isFillViewport = true
+                addView(scrollBody)
+            }
+            content.addView(scroll, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            ))
 
-            fun label(textValue: String): TextView = TextView(this).apply {
-                text = textValue
+            val message = TextView(this).apply {
+                text = if (searchResults.isEmpty()) {
+                    "请输入要搜索的数值"
+                } else {
+                    "找到 ${searchResults.size} 个结果。再次搜索会在当前结果中继续筛选。"
+                }
+                setTextColor(Color.parseColor("#F3EDF7"))
+                textSize = 13f
+                setPadding(0, 0, 0, dp(7))
+            }
+            scrollBody.addView(message)
+
+            fun smallLabel(value: String): TextView = TextView(this).apply {
+                text = value
                 setTextColor(Color.parseColor("#E6E0E9"))
-                textSize = 10f
+                textSize = 10.5f
                 gravity = Gravity.CENTER_VERTICAL
             }
 
-            fun input(initial: String = "", hintValue: String = ""): EditText = EditText(this).apply {
+            fun field(initial: String = "", hintValue: String = ""): EditText = EditText(this).apply {
                 setText(initial)
                 hint = hintValue
                 setSingleLine(true)
-                textSize = 11f
+                textSize = 11.5f
                 setTextColor(Color.WHITE)
-                setHintTextColor(Color.parseColor("#A9A4AE"))
-                setPadding(dp(8), 0, dp(8), 0)
-                background = GradientDrawable().apply {
-                    cornerRadius = dp(3).toFloat()
-                    setColor(Color.argb(38, 255, 255, 255))
-                    setStroke(dp(1), Color.parseColor("#FFB8B8B8"))
-                }
+                setHintTextColor(Color.parseColor("#938F99"))
+                setPadding(dp(9), 0, dp(9), 0)
+                inputType = android.text.InputType.TYPE_CLASS_TEXT
+                background = aggMenuDrawable(Color.argb(34, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
             }
 
-            val searchModes = arrayOf("精确", "范围", "地址/AOB")
-            val modeSpinner = Spinner(this).apply {
-                adapter = ArrayAdapter(this@OverlayService, android.R.layout.simple_spinner_item, searchModes).apply {
+            fun spinner(values: Array<String>): Spinner = Spinner(this).apply {
+                adapter = ArrayAdapter(this@OverlayService, android.R.layout.simple_spinner_item, values).apply {
                     setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
                 }
-                background = GradientDrawable().apply {
-                    cornerRadius = dp(3).toFloat()
-                    setColor(Color.argb(38, 255, 255, 255))
-                    setStroke(dp(1), Color.parseColor("#FFB8B8B8"))
-                }
+                background = aggMenuDrawable(Color.argb(34, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
             }
-            val valueInput = input(savedSearchInput, "数值、范围或特征码")
+
+            fun button(label: String, action: () -> Unit): TextView = TextView(this).apply {
+                text = label
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                textSize = 10.5f
+                background = aggMenuDrawable(Color.argb(42, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
+                setOnClickListener { action() }
+            }
+
+            val typeHint = TextView(this).apply {
+                setTextColor(Color.parseColor("#CAC4D0"))
+                textSize = 9.5f
+                setPadding(0, 0, 0, dp(2))
+            }
+            scrollBody.addView(typeHint)
+
+            val operators = arrayOf("=", "≠", ">", "<", "范围", "地址", "AOB")
+            val operatorSpinner = spinner(operators)
+            val initialOperator = when (currentSearchMode) {
+                "range" -> "范围"
+                "addr" -> "地址"
+                "machine" -> "AOB"
+                else -> "="
+            }
+            operatorSpinner.setSelection(operators.indexOf(initialOperator).coerceAtLeast(0))
+
+            val valueInput = field(savedSearchInput, "输入数值")
             val valueRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                addView(label("数值"), LinearLayout.LayoutParams(dp(38), dp(48)))
-                addView(modeSpinner, LinearLayout.LayoutParams(dp(82), dp(42)).apply { marginEnd = dp(5) })
-                addView(valueInput, LinearLayout.LayoutParams(0, dp(42), 1f))
-                addView(TextView(this@OverlayService).apply {
-                    text = "HEX"
-                    gravity = Gravity.CENTER
-                    setTextColor(Color.WHITE)
-                    textSize = 9f
-                    background = GradientDrawable().apply {
-                        cornerRadius = dp(3).toFloat()
-                        setColor(Color.argb(34, 255, 255, 255))
-                        setStroke(dp(1), Color.parseColor("#FFB8B8B8"))
-                    }
-                    setOnClickListener {
-                        val raw = valueInput.text.toString().trim()
-                        val number = raw.toLongOrNull()
-                        if (number != null) valueInput.setText("0x${number.toString(16).uppercase()}")
-                    }
-                }, LinearLayout.LayoutParams(dp(48), dp(42)).apply { marginStart = dp(5) })
+                addView(smallLabel("值："), LinearLayout.LayoutParams(dp(34), dp(48)))
+                addView(operatorSpinner, LinearLayout.LayoutParams(dp(64), dp(48)).apply { marginEnd = dp(5) })
+                addView(valueInput, LinearLayout.LayoutParams(0, dp(48), 1f))
             }
-            content.addView(valueRow)
+            val converter = button("HEX") {
+                val raw = valueInput.text.toString().trim()
+                when {
+                    raw.startsWith("0x", true) -> raw.substring(2).toLongOrNull(16)?.let {
+                        valueInput.setText(it.toString())
+                    }
+                    raw.toLongOrNull() != null -> valueInput.setText(
+                        "0x${raw.toLong().toString(16).uppercase()}"
+                    )
+                }
+            }
+            valueRow.addView(converter, LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(5) })
+            scrollBody.addView(valueRow)
 
-            val maskInput = input(savedFilterInput, "AOB 掩码，例如 xx??xx")
+            val maskInput = field(savedFilterInput, "例如：FF ?? 10 20")
             val maskRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                addView(label("掩码"), LinearLayout.LayoutParams(dp(38), dp(44)))
-                addView(maskInput, LinearLayout.LayoutParams(0, dp(40), 1f))
+                addView(smallLabel("蒙版："), LinearLayout.LayoutParams(dp(56), dp(46)))
+                addView(maskInput, LinearLayout.LayoutParams(0, dp(44), 1f))
             }
-            content.addView(maskRow)
+            scrollBody.addView(maskRow)
+            val maskView = TextView(this).apply {
+                text = "AOB 支持空格分隔字节，?? 表示通配字节"
+                setTextColor(Color.parseColor("#938F99"))
+                textSize = 9f
+                setPadding(dp(56), 0, 0, dp(3))
+            }
+            scrollBody.addView(maskView)
+
+            val offsetInput = field("", "例如：0x10")
+            val offsetLayout = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(smallLabel("偏移量："), LinearLayout.LayoutParams(dp(62), dp(46)))
+                addView(offsetInput, LinearLayout.LayoutParams(0, dp(44), 1f))
+            }
+            scrollBody.addView(offsetLayout)
+            val hexInput = android.widget.CheckBox(this).apply {
+                text = "HEX"
+                setTextColor(Color.WHITE)
+                textSize = 10f
+                isChecked = true
+                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            }
+            scrollBody.addView(hexInput, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(42),
+            ))
 
             val types = arrayOf("dword", "float", "double", "word", "byte", "qword")
             val typeLabels = arrayOf("D: Dword", "F: Float", "E: Double", "W: Word", "B: Byte", "Q: Qword")
-            val typeSpinner = Spinner(this).apply {
-                adapter = ArrayAdapter(this@OverlayService, android.R.layout.simple_spinner_item, typeLabels).apply {
-                    setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-                }
+            val typeSpinner = spinner(typeLabels).apply {
                 setSelection(types.indexOf(searchDataType).coerceAtLeast(0))
-                background = GradientDrawable().apply {
-                    cornerRadius = dp(3).toFloat()
-                    setColor(Color.argb(38, 255, 255, 255))
-                    setStroke(dp(1), Color.parseColor("#FFB8B8B8"))
-                }
             }
             val typeRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                addView(label("类型"), LinearLayout.LayoutParams(dp(38), dp(44)))
-                addView(typeSpinner, LinearLayout.LayoutParams(0, dp(42), 1f))
+                addView(smallLabel("类型："), LinearLayout.LayoutParams(dp(56), dp(46)))
+                addView(typeSpinner, LinearLayout.LayoutParams(0, dp(44), 1f))
             }
-            content.addView(typeRow)
+            scrollBody.addView(typeRow)
 
-            val options = LinearLayout(this).apply {
+            val optionRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
             val encrypted = android.widget.CheckBox(this).apply {
-                text = "加密数值"
+                text = "此值被加密"
                 setTextColor(Color.WHITE)
                 textSize = 10f
                 buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+                setOnClickListener {
+                    if (isChecked) {
+                        isChecked = false
+                        Toast.makeText(this@OverlayService, "当前扫描器暂不支持加密值搜索", Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
             val ordered = android.widget.CheckBox(this).apply {
-                text = "有序组搜"
+                text = "按顺序"
                 setTextColor(Color.WHITE)
                 textSize = 10f
                 buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-            }
-            options.addView(encrypted, LinearLayout.LayoutParams(0, dp(44), 1f))
-            options.addView(ordered, LinearLayout.LayoutParams(0, dp(44), 1f))
-            content.addView(options)
-
-            fun dialogButton(textValue: String, action: () -> Unit): TextView = TextView(this).apply {
-                text = textValue
-                gravity = Gravity.CENTER
-                setTextColor(Color.WHITE)
-                textSize = 10f
-                background = GradientDrawable().apply {
-                    cornerRadius = dp(4).toFloat()
-                    setColor(Color.argb(42, 255, 255, 255))
-                    setStroke(dp(1), Color.parseColor("#FFB8B8B8"))
+                setOnClickListener {
+                    if (isChecked) {
+                        isChecked = false
+                        Toast.makeText(this@OverlayService, "当前扫描器暂不支持有序组搜索", Toast.LENGTH_SHORT).show()
+                    }
                 }
-                setOnClickListener { action() }
             }
+            optionRow.addView(encrypted, LinearLayout.LayoutParams(0, dp(48), 1f))
+            optionRow.addView(ordered, LinearLayout.LayoutParams(0, dp(48), 1f))
+            scrollBody.addView(optionRow)
+
+            fun typeRangeHint(type: String): String = when (type) {
+                "byte" -> "输入从 -128 到 127 的值"
+                "word" -> "输入从 -32768 到 32767 的值"
+                "dword" -> "输入从 -2147483648 到 2147483647 的值"
+                "qword" -> "输入 64 位整数值"
+                "float" -> "输入单精度浮点值"
+                "double" -> "输入双精度浮点值"
+                else -> "输入要搜索的值"
+            }
+
+            fun updateModeRows() {
+                val mode = operators[operatorSpinner.selectedItemPosition.coerceIn(operators.indices)]
+                maskRow.visibility = if (mode == "AOB") View.VISIBLE else View.GONE
+                maskView.visibility = maskRow.visibility
+                offsetLayout.visibility = if (mode == "地址") View.VISIBLE else View.GONE
+                hexInput.visibility = if (mode == "地址") View.VISIBLE else View.GONE
+                typeRow.visibility = if (mode == "AOB" || mode == "地址") View.GONE else View.VISIBLE
+                typeHint.visibility = typeRow.visibility
+                currentSearchMode = when (mode) {
+                    "范围", ">", "<" -> "range"
+                    "地址" -> "addr"
+                    "AOB" -> "machine"
+                    else -> "exact"
+                }
+            }
+
+            operatorSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    updateModeRows()
+                }
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+            }
+            typeSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    typeHint.text = typeRangeHint(types[position.coerceIn(types.indices)])
+                }
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+            }
+            typeHint.text = typeRangeHint(types[typeSpinner.selectedItemPosition.coerceIn(types.indices)])
+            updateModeRows()
 
             fun runSearch(block: () -> List<Map<String, Any>>) {
-                savedSearchInput = valueInput.text.toString()
-                savedFilterInput = maskInput.text.toString()
+                savedSearchInput = valueInput.text.toString().trim()
+                savedFilterInput = maskInput.text.toString().trim()
                 searchDataType = types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]
-                status.text = "正在搜索…"
-                status.setTextColor(Color.WHITE)
+                message.text = "正在搜索…"
+                message.setTextColor(Color.parseColor("#D0BCFF"))
                 Thread {
                     val autoPause = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
                         .getBoolean("agg_autopause", false)
@@ -5177,96 +5461,178 @@ class OverlayService : Service() {
                 }.start()
             }
 
-            val fuzzyTitle = TextView(this).apply {
-                text = "模糊搜索"
-                setTextColor(Color.parseColor("#FFB8B8B8"))
-                textSize = 9f
+            fun parseCurrentValue(type: String): Number? {
+                val raw = valueInput.text.toString().trim()
+                return if (type == "float" || type == "double") {
+                    raw.toDoubleOrNull()
+                } else {
+                    when {
+                        raw.startsWith("0x", true) -> raw.substring(2).toLongOrNull(16)
+                        else -> raw.toLongOrNull()
+                    }
+                }
+            }
+
+            fun performSearch() {
+                val mode = operators[operatorSpinner.selectedItemPosition.coerceIn(operators.indices)]
+                val type = types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]
+                val raw = valueInput.text.toString().trim()
+                if (raw.isBlank()) {
+                    message.text = "请输入搜索内容"
+                    message.setTextColor(Color.parseColor("#FFB4AB"))
+                    return
+                }
+                when (mode) {
+                    "AOB" -> runSearch {
+                        MemoryEngine.searchAob(raw, maskInput.text.toString().trim().takeIf { it.isNotBlank() })
+                    }
+                    "地址" -> {
+                        val base = parseAddress(raw)
+                        if (base == null) {
+                            message.text = "地址格式不正确"
+                            message.setTextColor(Color.parseColor("#FFB4AB"))
+                            return
+                        }
+                        val offsetRaw = offsetInput.text.toString().trim()
+                        val offset = when {
+                            offsetRaw.isBlank() -> 0L
+                            offsetRaw.startsWith("-0x", true) -> -(offsetRaw.substring(3).toLongOrNull(16) ?: 0L)
+                            offsetRaw.startsWith("0x", true) -> offsetRaw.substring(2).toLongOrNull(16) ?: 0L
+                            else -> offsetRaw.toLongOrNull() ?: 0L
+                        }
+                        runSearch { MemoryEngine.searchAob("0x${(base + offset).toString(16)}") }
+                    }
+                    "范围" -> {
+                        val parts = raw.split('~', ';', ',', '～').map { it.trim() }.filter { it.isNotBlank() }
+                        if (parts.size < 2) {
+                            message.text = "范围格式示例：1~100"
+                            message.setTextColor(Color.parseColor("#FFB4AB"))
+                            return
+                        }
+                        val low = if (type == "float" || type == "double") parts[0].toDoubleOrNull() else parseMemoryValue(parts[0], type) as? Number
+                        val high = if (type == "float" || type == "double") parts[1].toDoubleOrNull() else parseMemoryValue(parts[1], type) as? Number
+                        if (low == null || high == null || low.toDouble() > high.toDouble()) {
+                            message.text = "范围数值格式不正确"
+                            message.setTextColor(Color.parseColor("#FFB4AB"))
+                            return
+                        }
+                        runSearch { MemoryEngine.searchByRange(low, high, type) }
+                    }
+                    "≠" -> {
+                        val target = parseCurrentValue(type)
+                        if (target == null || searchResults.isEmpty()) {
+                            message.text = "“≠”需要先有搜索结果，再在当前结果中筛选"
+                            message.setTextColor(Color.parseColor("#FFB4AB"))
+                            return
+                        }
+                        val previous = searchResults.toList()
+                        runSearch {
+                            previous.mapNotNull { item ->
+                                val address = (item["addressInt"] as? Number)?.toLong() ?: return@mapNotNull null
+                                val value = MemoryEngine.readMemory(address, type) as? Number ?: return@mapNotNull null
+                                val differs = if (type == "float" || type == "double") {
+                                    value.toDouble() != target.toDouble()
+                                } else value.toLong() != target.toLong()
+                                if (!differs) null else item.toMutableMap().apply { this["value"] = value; this["type"] = type }
+                            }
+                        }
+                    }
+                    ">", "<" -> {
+                        val value = parseCurrentValue(type)
+                        if (value == null) {
+                            message.text = "数值格式不正确"
+                            message.setTextColor(Color.parseColor("#FFB4AB"))
+                            return
+                        }
+                        val min: Number
+                        val max: Number
+                        if (type == "float" || type == "double") {
+                            min = if (mode == ">") value.toDouble() else -Double.MAX_VALUE
+                            max = if (mode == ">") Double.MAX_VALUE else value.toDouble()
+                        } else {
+                            min = if (mode == ">") value.toLong() else Long.MIN_VALUE
+                            max = if (mode == ">") Long.MAX_VALUE else value.toLong()
+                        }
+                        runSearch { MemoryEngine.searchByRange(min, max, type) }
+                    }
+                    else -> {
+                        val value = parseCurrentValue(type)
+                        if (value == null) {
+                            message.text = "数值格式不正确"
+                            message.setTextColor(Color.parseColor("#FFB4AB"))
+                            return
+                        }
+                        runSearch {
+                            val refine = searchResults.isNotEmpty() && searchDataType == type
+                            if (refine) {
+                                MemoryEngine.filterResults(
+                                    searchResults.mapNotNull { (it["addressInt"] as? Number)?.toLong() },
+                                    value,
+                                    type,
+                                )
+                            } else {
+                                MemoryEngine.searchExact(value, type)
+                            }
+                        }
+                    }
+                }
+            }
+
+            val fuzzyText = TextView(this).apply {
+                text = if (searchResults.isEmpty()) "模糊搜索：首次操作会建立值快照" else "模糊搜索：在当前快照中继续筛选"
+                setTextColor(Color.parseColor("#CAC4D0"))
+                textSize = 9.5f
                 setPadding(0, dp(4), 0, dp(3))
             }
-            content.addView(fuzzyTitle)
+            scrollBody.addView(fuzzyText)
 
             val fuzzyRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            fuzzyRow1.addView(dialogButton("数值未变") {
-                runSearch { MemoryEngine.searchFuzzy("unchanged", types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]) }
-            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(3) })
-            fuzzyRow1.addView(dialogButton("数值变化") {
-                runSearch { MemoryEngine.searchFuzzy("changed", types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]) }
-            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3) })
-            content.addView(fuzzyRow1)
+            fuzzyRow1.addView(button("无变化") {
+                val type = types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]
+                runSearch { MemoryEngine.searchFuzzy("unchanged", type) }
+            }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(3) })
+            fuzzyRow1.addView(button("有变化") {
+                val type = types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]
+                runSearch { MemoryEngine.searchFuzzy("changed", type) }
+            }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginStart = dp(3) })
+            scrollBody.addView(fuzzyRow1)
 
             val fuzzyRow2 = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(0, dp(5), 0, 0)
             }
-            fuzzyRow2.addView(dialogButton("数值增加") {
-                runSearch { MemoryEngine.searchFuzzy("increased", types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]) }
-            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(3) })
-            fuzzyRow2.addView(dialogButton("数值减少") {
-                runSearch { MemoryEngine.searchFuzzy("decreased", types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]) }
-            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3) })
-            content.addView(fuzzyRow2)
+            fuzzyRow2.addView(button("增加了") {
+                val type = types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]
+                runSearch { MemoryEngine.searchFuzzy("increased", type) }
+            }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(3) })
+            fuzzyRow2.addView(button("减少了") {
+                val type = types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]
+                runSearch { MemoryEngine.searchFuzzy("decreased", type) }
+            }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginStart = dp(3) })
+            scrollBody.addView(fuzzyRow2)
 
-            content.addView(dialogButton("内存范围：${MemoryEngine.getSelectedRegionCategories().joinToString(", ").ifBlank { "全部" }}") {
-                showRegionPanel()
-            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)).apply { topMargin = dp(6) })
+            scrollBody.addView(button(
+                "内存范围：${MemoryEngine.getSelectedRegionCategories().joinToString(", ").ifBlank { "全部" }}"
+            ) { showRegionPanel() }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(44),
+            ).apply { topMargin = dp(6) })
 
             val footer = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(0, dp(7), 0, 0)
             }
-            footer.addView(dialogButton("取消") { showAggSearchTab() }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(3) })
-            footer.addView(dialogButton("范围") { showRegionPanel() }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
-            footer.addView(dialogButton("搜索") {
-                val raw = valueInput.text.toString().trim()
-                val type = types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]
-                if (raw.isBlank()) {
-                    status.text = "请输入搜索内容"
-                    status.setTextColor(Color.parseColor("#FFFF8A80"))
-                    return@dialogButton
-                }
-                when (modeSpinner.selectedItemPosition) {
-                    0 -> {
-                        val parsed: Any? = if (type == "float" || type == "double") raw.toDoubleOrNull() else {
-                            when {
-                                raw.startsWith("0x", true) -> raw.substring(2).toLongOrNull(16)
-                                else -> raw.toLongOrNull()
-                            }
-                        }
-                        if (parsed == null) {
-                            status.text = "数值格式不正确"
-                            status.setTextColor(Color.parseColor("#FFFF8A80"))
-                            return@dialogButton
-                        }
-                        runSearch {
-                            val sameTypeRefine = searchResults.isNotEmpty() && searchDataType == type
-                            if (sameTypeRefine) {
-                                MemoryEngine.filterResults(searchResults.mapNotNull { (it["addressInt"] as? Number)?.toLong() }, parsed, type)
-                            } else {
-                                MemoryEngine.searchExact(parsed, type)
-                            }
-                        }
-                    }
-                    1 -> {
-                        val parts = raw.split('~', ';', ',', '～').map { it.trim() }.filter { it.isNotBlank() }
-                        if (parts.size < 2) {
-                            status.text = "范围格式示例：1~100"
-                            status.setTextColor(Color.parseColor("#FFFF8A80"))
-                            return@dialogButton
-                        }
-                        val min = parts[0].toDoubleOrNull()
-                        val max = parts[1].toDoubleOrNull()
-                        if (min == null || max == null) {
-                            status.text = "范围数值格式不正确"
-                            status.setTextColor(Color.parseColor("#FFFF8A80"))
-                            return@dialogButton
-                        }
-                        runSearch { MemoryEngine.searchByRange(min, max, type) }
-                    }
-                    else -> runSearch { MemoryEngine.searchAob(raw, maskInput.text.toString().takeIf { it.isNotBlank() }) }
-                }
-            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3) })
-            content.addView(footer)
-        }, 390, 540, onBack = { showAggSearchTab() }, titleIcon = R.drawable.ic_magnify_white_24dp, bgColor = "#C0000000")
+            footer.addView(button("取消") { showAggSearchTab() }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(3) })
+            footer.addView(button("更多") { showAggResultFilterPanel() }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
+            footer.addView(button("搜索") { performSearch() }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginStart = dp(3) })
+            scrollBody.addView(footer)
+
+            valueInput.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            valueInput.setOnEditorActionListener { _, _, _ ->
+                performSearch()
+                true
+            }
+        }, 400, 610, onBack = { showAggSearchTab() }, titleIcon = R.drawable.ic_magnify_white_24dp, bgColor = "#C0000000")
     }
 
     private fun showSearchPanelLegacyCard() {

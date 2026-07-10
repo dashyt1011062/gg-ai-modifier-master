@@ -19,6 +19,7 @@ object RootManager {
      * 检查并请求 Root 权限
      * 只在第一次调用时触发 Magisk 授权弹窗
      */
+    @Synchronized
     fun checkRootAccess(): Boolean {
         if (hasRootAccess == true) return true
         return initSuShell()
@@ -61,6 +62,7 @@ object RootManager {
     /**
      * 执行 root 命令（使用持久化 shell）
      */
+    @Synchronized
     fun executeRootCommand(command: String): String? {
         if (hasRootAccess != true) {
             if (!initSuShell()) return null
@@ -180,8 +182,10 @@ object RootManager {
      */
     fun readMemoryViaRoot(pid: Int, address: Long, size: Int): ByteArray? {
         try {
-            // 使用 xxd 读取并转为十六进制
-            val cmd = "dd if=/proc/$pid/mem bs=1 skip=$address count=$size 2>/dev/null | xxd -p"
+            // 优先使用 xxd；部分 Android ROM 没有 xxd 时退回 toybox od。
+            val cmd = "if command -v xxd >/dev/null 2>&1; then " +
+                    "dd if=/proc/$pid/mem bs=1 skip=$address count=$size 2>/dev/null | xxd -p; " +
+                    "else dd if=/proc/$pid/mem bs=1 skip=$address count=$size 2>/dev/null | od -An -v -tx1; fi"
             val hexResult = executeRootCommand(cmd) ?: return null
             
             if (hexResult.isEmpty()) return null
@@ -214,10 +218,12 @@ object RootManager {
             val hexString = data.joinToString("") { "%02x".format(it) }
             
             // 通过 xxd 解码并写入
-            val cmd = "echo '$hexString' | xxd -r -p | dd of=/proc/$pid/mem bs=1 seek=$address count=${data.size} 2>/dev/null"
+            val cmd = "if command -v xxd >/dev/null 2>&1 && " +
+                    "echo '$hexString' | xxd -r -p | dd of=/proc/$pid/mem bs=1 seek=$address count=${data.size} 2>/dev/null; " +
+                    "then echo WRITE_OK; else echo WRITE_FAIL; fi"
             val result = executeRootCommand(cmd)
-            
-            return result != null
+
+            return result?.lineSequence()?.any { it.trim() == "WRITE_OK" } == true
         } catch (e: Exception) {
             android.util.Log.e("RootManager", "writeMemoryViaRoot failed: ${e.message}")
             return false

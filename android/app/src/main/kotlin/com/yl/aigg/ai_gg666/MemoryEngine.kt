@@ -28,6 +28,8 @@ object MemoryEngine {
     private var appContext: Context? = null
     private var lastLivenessCheckAt = 0L
     private var lastLivenessResult = false
+    @Volatile private var useRootShellIoFallback = false
+    @Volatile private var lastAttachError = ""
     private val regionCategoryLabels = linkedMapOf(
         "anonymous" to "匿名内存",
         "heap" to "原生堆",
@@ -66,17 +68,21 @@ object MemoryEngine {
             return true
         }
 
+        lastAttachError = ""
+        useRootShellIoFallback = false
         return try {
             if (!RootManager.checkRootAccess()) {
+                lastAttachError = "未获得 Root 权限"
                 Log.e(TAG, "❌ No root access")
                 return false
             }
             if (!isPidAlive(pid)) {
+                lastAttachError = "目标进程已经退出"
                 Log.e(TAG, "❌ Process $pid is not running")
                 return false
             }
 
-            // AGG 在切换进程时会清空旧搜索/保存状态；这里同样避免旧地址污染新进程。
+            // 切换进程时清空旧搜索/冻结状态，避免旧地址污染新进程。
             MemoryFreezer.clearAll()
             RootScanner.shutdown()
             attachedPid = null
@@ -85,32 +91,64 @@ object MemoryEngine {
             lastSnapshotType = null
             aobDatabase.clear()
 
-            val ctx = appContext ?: return false
-            val scannerReady = runBlocking { RootScanner.initialize(ctx) }
-            if (!scannerReady) {
-                Log.e(TAG, "❌ Root scanner initialization failed")
+            val ctx = appContext ?: run {
+                lastAttachError = "扫描器上下文未初始化"
                 return false
+            }
+            var scannerReady = runBlocking { RootScanner.initialize(ctx) }
+            if (!scannerReady) {
+                // 仍继续尝试 /proc/<pid>/mem Root Shell 兼容路径。
+                Log.w(TAG, "Root scanner initialization failed, trying root-shell IO")
             }
 
             val regions = getRegions(pid)
             if (regions.isEmpty()) {
                 RootScanner.shutdown()
+                lastAttachError = "没有找到可扫描的内存区域"
                 Log.e(TAG, "Process $pid has no accessible regions")
                 return false
             }
 
+            // 不能只以 /proc/<pid>/maps 可读作为附加成功依据：必须实际读取一次。
+            // 首次探测失败时重启扫描器再试，修复 su shell/旧 scanner 残留导致的假成功。
+            var scannerReadable = scannerReady && probeScannerRead(pid, regions)
+            if (!scannerReadable) {
+                RootScanner.shutdown()
+                scannerReady = runBlocking { RootScanner.initialize(ctx) }
+                scannerReadable = scannerReady && probeScannerRead(pid, regions)
+            }
+
+            var shellReadable = false
+            if (!scannerReadable) {
+                shellReadable = probeRootShellRead(pid, regions)
+            }
+            if (!scannerReadable && !shellReadable) {
+                RootScanner.shutdown()
+                lastAttachError = "进程存在，但内存读取测试失败"
+                Log.e(TAG, "Process $pid exists but no memory page can be read")
+                return false
+            }
+
+            useRootShellIoFallback = !scannerReadable && shellReadable
             activeRegions = regions
             attachedPid = pid
             lastLivenessCheckAt = System.currentTimeMillis()
             lastLivenessResult = true
+            lastAttachError = if (useRootShellIoFallback) "已使用 Root Shell 兼容读取" else ""
 
             val totalMB = activeRegions.sumOf { it.endAddr - it.startAddr } / 1024 / 1024
-            Log.i(TAG, "✅ Attached to process $pid (${activeRegions.size} regions, ${totalMB}MB)")
+            Log.i(
+                TAG,
+                "✅ Attached to process $pid (${activeRegions.size} regions, ${totalMB}MB, " +
+                        (if (useRootShellIoFallback) "root-shell IO)" else "scanner IO)"),
+            )
             true
         } catch (e: Exception) {
             RootScanner.shutdown()
             attachedPid = null
             activeRegions = emptyList()
+            useRootShellIoFallback = false
+            lastAttachError = e.message ?: "附加时发生未知错误"
             Log.e(TAG, "❌ Failed to attach: ${e.message}", e)
             false
         }
@@ -126,6 +164,8 @@ object MemoryEngine {
         aobDatabase.clear()
         lastLivenessResult = false
         lastLivenessCheckAt = 0L
+        useRootShellIoFallback = false
+        lastAttachError = ""
         RootScanner.shutdown()
     }
 
@@ -157,6 +197,49 @@ object MemoryEngine {
             "if [ -d /proc/$pid ]; then echo alive; else echo dead; fi"
         )?.trim() == "alive"
     }
+
+    private fun probeScannerRead(pid: Int, regions: List<MemRegion>): Boolean {
+        return regions.asSequence().take(16).any { region ->
+            val size = minOf(8L, region.endAddr - region.startAddr).toInt()
+            size > 0 && runCatching {
+                runBlocking { RootScanner.readMemory(pid, region.startAddr, size) }
+            }.getOrNull()?.size == size
+        }
+    }
+
+    private fun probeRootShellRead(pid: Int, regions: List<MemRegion>): Boolean {
+        return regions.asSequence().take(8).any { region ->
+            val size = minOf(4L, region.endAddr - region.startAddr).toInt()
+            size > 0 && RootManager.readMemoryViaRoot(pid, region.startAddr, size)?.size == size
+        }
+    }
+
+    private fun readRawMemory(pid: Int, address: Long, size: Int): ByteArray? {
+        if (address <= 0L || size <= 0) return null
+        if (!useRootShellIoFallback) {
+            val scannerData = runCatching {
+                runBlocking { RootScanner.readMemory(pid, address, size) }
+            }.getOrNull()
+            if (scannerData != null && scannerData.size == size) return scannerData
+        }
+        val shellData = RootManager.readMemoryViaRoot(pid, address, size)
+        return shellData?.takeIf { it.size == size }
+    }
+
+    private fun writeRawMemory(pid: Int, address: Long, data: ByteArray): Boolean {
+        if (address <= 0L || data.isEmpty()) return false
+        if (!useRootShellIoFallback) {
+            val scannerWritten = runCatching {
+                runBlocking { RootScanner.writeMemory(pid, address, data) }
+            }.getOrDefault(false)
+            if (scannerWritten) return true
+        }
+        return RootManager.writeMemoryViaRoot(pid, address, data)
+    }
+
+    fun getAttachError(): String = lastAttachError
+
+    fun getIoModeLabel(): String = if (useRootShellIoFallback) "Root Shell" else "高速扫描器"
 
     // ==================== 内存段解析（通过 Root Shell 一次性读取） ====================
 
@@ -541,9 +624,7 @@ object MemoryEngine {
         if (address <= 0L || !isSupportedType(type) || !isAttachedProcessAlive()) return null
         return try {
             val typeSize = getTypeSize(type)
-            val bytes = runBlocking {
-                RootScanner.readMemory(pid, address, typeSize)
-            } ?: return null
+            val bytes = readRawMemory(pid, address, typeSize) ?: return null
             bytesToValue(bytes, type)
         } catch (e: Exception) {
             Log.e(TAG, "readMemory failed: ${e.message}")
@@ -559,9 +640,7 @@ object MemoryEngine {
         if (address <= 0L || !isSupportedType(type) || !isAttachedProcessAlive()) return false
         return try {
             val bytes = valueToBytes(value, type) ?: return false
-            runBlocking {
-                RootScanner.writeMemory(pid, address, bytes)
-            }
+            writeRawMemory(pid, address, bytes)
         } catch (e: Exception) {
             Log.e(TAG, "writeMemory failed: ${e.message}")
             false
@@ -575,7 +654,7 @@ object MemoryEngine {
         val pid = attachedPid ?: return null
         if (address <= 0L || size <= 0 || size > 16 * 1024 * 1024 || !isAttachedProcessAlive()) return null
         return try {
-            runBlocking { RootScanner.readMemory(pid, address, size) }
+            readRawMemory(pid, address, size)
         } catch (e: Exception) {
             Log.e(TAG, "readBytes failed: ${e.message}")
             null
@@ -586,7 +665,7 @@ object MemoryEngine {
         val pid = attachedPid ?: return false
         if (address <= 0L || data.isEmpty() || data.size > 16 * 1024 * 1024 || !isAttachedProcessAlive()) return false
         return try {
-            runBlocking { RootScanner.writeMemory(pid, address, data) }
+            writeRawMemory(pid, address, data)
         } catch (e: Exception) {
             Log.e(TAG, "writeBytes failed: ${e.message}")
             false
@@ -612,7 +691,7 @@ object MemoryEngine {
             outputFile.outputStream().buffered().use { output ->
                 while (cursor < to) {
                     val size = minOf(256 * 1024L, to - cursor).toInt()
-                    val data = runBlocking { RootScanner.readMemory(pid, cursor, size) } ?: return -1L
+                    val data = readRawMemory(pid, cursor, size) ?: return -1L
                     if (data.isEmpty()) return -1L
                     output.write(data)
                     cursor += data.size
@@ -641,9 +720,8 @@ object MemoryEngine {
     fun analyzeMemoryRegion(address: Long, range: Int): Map<String, Any> {
         val pid = attachedPid ?: return emptyMap()
         return try {
-            val data = runBlocking {
-                RootScanner.readMemory(pid, (address - range).coerceAtLeast(0), range * 2)
-            } ?: return emptyMap()
+            val data = readRawMemory(pid, (address - range).coerceAtLeast(0), range * 2)
+                ?: return emptyMap()
             mapOf("address" to address, "range" to range, "data" to data.joinToString("") { "%02x".format(it) }, "size" to data.size)
         } catch (e: Exception) { emptyMap() }
     }
@@ -660,20 +738,40 @@ object MemoryEngine {
         val byteCount = safeCount * itemSize
 
         return try {
-            val data = runBlocking { RootScanner.readMemory(pid, alignedStart, byteCount) } ?: return emptyList()
-            val actualCount = data.size / itemSize
-            List(actualCount) { index ->
-                val offset = index * itemSize
-                val bytes = data.copyOfRange(offset, offset + itemSize)
-                val address = alignedStart + offset
-                mapOf(
-                    "address" to "0x${address.toString(16).uppercase()}",
-                    "addressInt" to address,
-                    "value" to (bytesToValue(bytes, type) ?: 0),
-                    "type" to type,
-                    "machineCode" to bytes.joinToString(" ") { String.format("%02X", it) },
-                    "isFrozen" to MemoryFreezer.isFrozen(address),
-                )
+            val data = readRawMemory(pid, alignedStart, byteCount)
+            if (data != null && data.size >= itemSize) {
+                val actualCount = data.size / itemSize
+                List(actualCount) { index ->
+                    val offset = index * itemSize
+                    val bytes = data.copyOfRange(offset, offset + itemSize)
+                    val address = alignedStart + offset
+                    mapOf(
+                        "address" to "0x${address.toString(16).uppercase()}",
+                        "addressInt" to address,
+                        "value" to (bytesToValue(bytes, type) ?: 0),
+                        "type" to type,
+                        "machineCode" to bytes.joinToString(" ") { String.format("%02X", it) },
+                        "isFrozen" to MemoryFreezer.isFrozen(address),
+                    )
+                }
+            } else {
+                // 批量读取跨越不可读页时，退化为逐项读取，避免整个内存页显示为空。
+                buildList {
+                    for (index in 0 until safeCount) {
+                        val address = alignedStart + index.toLong() * itemSize
+                        val bytes = readRawMemory(pid, address, itemSize) ?: continue
+                        add(
+                            mapOf(
+                                "address" to "0x${address.toString(16).uppercase()}",
+                                "addressInt" to address,
+                                "value" to (bytesToValue(bytes, type) ?: 0),
+                                "type" to type,
+                                "machineCode" to bytes.joinToString(" ") { String.format("%02X", it) },
+                                "isFrozen" to MemoryFreezer.isFrozen(address),
+                            )
+                        )
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "readMemoryWindow failed: ${e.message}")
