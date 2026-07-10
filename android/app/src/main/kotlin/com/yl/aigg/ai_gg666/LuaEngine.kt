@@ -27,7 +27,7 @@ object LuaEngine {
     private var context: Context? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var searchResults = mutableListOf<Map<String, Any>>()
-    private var frozenList = mutableListOf<Map<String, Any>>()
+    private val savedList = mutableListOf<MutableMap<String, Any?>>()
     private val outputLog = StringBuilder()
 
     fun setContext(ctx: Context?) {
@@ -41,7 +41,6 @@ object LuaEngine {
     fun executeScript(scriptContent: String): String {
         outputLog.clear()
         searchResults.clear()
-        frozenList.clear()
 
         try {
             val globals = JsePlatform.standardGlobals()
@@ -217,6 +216,33 @@ object LuaEngine {
         }
     }
 
+    private fun parseLuaMemoryValue(value: LuaValue, type: String): Any? {
+        if (value.isnil()) return null
+        if (value.isnumber()) {
+            return if (type == "float" || type == "double") value.todouble() else value.tolong()
+        }
+        val raw = value.tojstring().trim()
+        if (raw.isEmpty()) return null
+        return if (type == "float" || type == "double") {
+            raw.toDoubleOrNull()
+        } else {
+            when {
+                raw.startsWith("0x", ignoreCase = true) -> raw.substring(2).toLongOrNull(16)
+                raw.endsWith("h", ignoreCase = true) -> raw.dropLast(1).toLongOrNull(16)
+                else -> raw.toLongOrNull()
+            }
+        }
+    }
+
+    private fun freezeModeName(mode: Int): String {
+        return when (mode) {
+            MemoryFreezer.FREEZE_MAY_INCREASE -> "mayIncrease"
+            MemoryFreezer.FREEZE_MAY_DECREASE -> "mayDecrease"
+            MemoryFreezer.FREEZE_IN_RANGE -> "inRange"
+            else -> "normal"
+        }
+    }
+
     private fun registerGgApi(gg: LuaTable) {
         // gg.toast
         gg.set("toast", object : OneArgFunction() {
@@ -344,46 +370,101 @@ object LuaEngine {
             }
         })
 
+        // gg.loadResults
+        gg.set("loadResults", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                if (!arg.istable()) return LuaValue.valueOf("results must be a table")
+                val input = arg.checktable()
+                val loaded = mutableListOf<Map<String, Any>>()
+                for (i in 1..input.length()) {
+                    val source = input.get(i)
+                    if (!source.istable()) continue
+                    val item = source.checktable()
+                    val address = parseLuaAddress(item.get("address")) ?: continue
+                    val flagsValue = item.get("flags")
+                    val type = luaTypeToDataType(if (flagsValue.isnil()) 4 else flagsValue.toint())
+                    val value = MemoryEngine.readMemory(address, type) ?: continue
+                    loaded.add(
+                        mapOf(
+                            "address" to "0x${address.toString(16).uppercase()}",
+                            "addressInt" to address,
+                            "value" to value,
+                            "type" to type,
+                        )
+                    )
+                }
+                searchResults.clear()
+                searchResults.addAll(loaded)
+                outputLog.appendLine("📥 已加载 ${loaded.size} 条搜索结果")
+                return LuaValue.TRUE
+            }
+        })
+
+        // gg.editAll
+        gg.set("editAll", object : TwoArgFunction() {
+            override fun call(arg1: LuaValue, arg2: LuaValue): LuaValue {
+                val type = luaTypeToDataType(arg2.toint())
+                val rawValues = arg1.tojstring().split(';').map { it.trim() }.filter { it.isNotEmpty() }
+                if (rawValues.isEmpty()) return LuaValue.valueOf("value is empty")
+                var count = 0
+                val updated = searchResults.toMutableList()
+                for ((index, result) in searchResults.withIndex()) {
+                    val resultType = result["type"] as? String ?: type
+                    if (resultType != type) continue
+                    val address = (result["addressInt"] as? Number)?.toLong()
+                        ?: result["address"]?.toString()?.removePrefix("0x")?.removePrefix("0X")?.toLongOrNull(16)
+                        ?: continue
+                    val raw = rawValues[count % rawValues.size]
+                    val value = parseLuaMemoryValue(LuaValue.valueOf(raw), type) ?: continue
+                    var success = MemoryEngine.writeMemory(address, value, type)
+                    if (success && MemoryFreezer.isFrozen(address)) {
+                        val freezeType = MemoryFreezer.getFreezeType(address) ?: MemoryFreezer.FREEZE_NORMAL
+                        success = MemoryFreezer.freeze(address, value, type, freezeType)
+                    }
+                    if (success) {
+                        updated[index] = result.toMutableMap().apply { this["value"] = value }
+                        count++
+                    }
+                }
+                searchResults.clear()
+                searchResults.addAll(updated)
+                outputLog.appendLine("✏️ editAll 已修改 $count 条结果")
+                return LuaValue.valueOf(count)
+            }
+        })
+
         // gg.setValues
         gg.set("setValues", object : OneArgFunction() {
             override fun call(arg: LuaValue): LuaValue {
-                if (!arg.istable()) return LuaValue.valueOf(0)
+                if (!arg.istable()) return LuaValue.valueOf("values must be a table")
                 val table = arg.checktable()
                 var count = 0
                 for (i in 1..table.length()) {
                     val item = table.get(i)
-                    if (item.istable()) {
-                        val itemTable = item.checktable()
-                        val addr = itemTable.get("address")
-                        val value = itemTable.get("value")
-                        val flags = itemTable.get("flags")
-                        if (!addr.isnil() && !value.isnil()) {
-                            val address = addr.tojstring().removePrefix("0x").removePrefix("0X").toLongOrNull(16) ?: continue
-                            val type = luaTypeToDataType(flags.toint())
-                            val numValue: Any = when (type) {
-                                "float", "double" -> value.todouble()
-                                else -> value.tolong()
-                            }
-                            if (MemoryEngine.writeMemory(address, numValue, type)) count++
-                        }
+                    if (!item.istable()) continue
+                    val itemTable = item.checktable()
+                    val address = parseLuaAddress(itemTable.get("address")) ?: continue
+                    val flags = itemTable.get("flags")
+                    val type = luaTypeToDataType(if (flags.isnil()) 4 else flags.toint())
+                    val numValue = parseLuaMemoryValue(itemTable.get("value"), type) ?: continue
+                    var success = MemoryEngine.writeMemory(address, numValue, type)
+                    if (success && MemoryFreezer.isFrozen(address)) {
+                        val currentMode = MemoryFreezer.getFreezeType(address) ?: MemoryFreezer.FREEZE_NORMAL
+                        success = MemoryFreezer.freeze(address, numValue, type, currentMode)
                     }
+                    if (success) count++
                 }
                 outputLog.appendLine("✏️ 已修改 $count 个地址")
-                return LuaValue.valueOf(count)
+                return if (count > 0 || table.length() == 0) LuaValue.TRUE else LuaValue.valueOf("no values were written")
             }
         })
 
         // gg.writeMemory
         gg.set("writeMemory", object : VarArgFunction() {
             override fun invoke(args: Varargs): Varargs {
-                val address = args.arg(1).tojstring().removePrefix("0x").removePrefix("0X").toLongOrNull(16)
-                    ?: return LuaValue.valueOf(false)
-                val value = args.arg(2)
+                val address = parseLuaAddress(args.arg(1)) ?: return LuaValue.valueOf(false)
                 val type = luaTypeToDataType(args.arg(3).toint())
-                val numValue: Any = when (type) {
-                    "float", "double" -> value.todouble()
-                    else -> value.tolong()
-                }
+                val numValue = parseLuaMemoryValue(args.arg(2), type) ?: return LuaValue.valueOf(false)
                 val success = MemoryEngine.writeMemory(address, numValue, type)
                 if (success) outputLog.appendLine("✏️ 写入 0x${address.toString(16).uppercase()} = $numValue")
                 return LuaValue.valueOf(success)
@@ -393,16 +474,14 @@ object LuaEngine {
         // gg.freeze
         gg.set("freeze", object : VarArgFunction() {
             override fun invoke(args: Varargs): Varargs {
-                val address = args.arg(1).tojstring().removePrefix("0x").removePrefix("0X").toLongOrNull(16)
-                    ?: return LuaValue.valueOf(false)
-                val value = args.arg(2)
+                val address = parseLuaAddress(args.arg(1)) ?: return LuaValue.valueOf(false)
                 val type = luaTypeToDataType(args.arg(3).toint())
-                val numValue: Any = when (type) {
-                    "float", "double" -> value.todouble()
-                    else -> value.tolong()
-                }
-                val success = MemoryFreezer.freeze(address, numValue, type)
-                if (success) outputLog.appendLine("🔒 冻结 0x${address.toString(16).uppercase()} = $numValue")
+                val numValue = parseLuaMemoryValue(args.arg(2), type) ?: return LuaValue.valueOf(false)
+                val freezeType = if (args.narg() >= 4) args.arg(4).toint() else MemoryFreezer.FREEZE_NORMAL
+                val freezeFrom = if (args.narg() >= 5) parseLuaMemoryValue(args.arg(5), type) else null
+                val freezeTo = if (args.narg() >= 6) parseLuaMemoryValue(args.arg(6), type) else null
+                val success = MemoryFreezer.freeze(address, numValue, type, freezeType, freezeFrom, freezeTo)
+                if (success) outputLog.appendLine("🔒 冻结 0x${address.toString(16).uppercase()} = $numValue (${freezeModeName(freezeType)})")
                 return LuaValue.valueOf(success)
             }
         })
@@ -410,30 +489,48 @@ object LuaEngine {
         // gg.addListItems
         gg.set("addListItems", object : OneArgFunction() {
             override fun call(arg: LuaValue): LuaValue {
-                if (!arg.istable()) return LuaValue.valueOf(0)
+                if (!arg.istable()) return LuaValue.valueOf("items must be a table")
                 val table = arg.checktable()
                 var count = 0
                 for (i in 1..table.length()) {
-                    val item = table.get(i)
-                    if (item.istable()) {
-                        val itemTable = item.checktable()
-                        val freeze = itemTable.get("freeze")
-                        if (freeze.toboolean()) {
-                            val address = itemTable.get("address").tojstring()
-                                .removePrefix("0x").removePrefix("0X").toLongOrNull(16) ?: continue
-                            val value = itemTable.get("value")
-                            val flags = itemTable.get("flags")
-                            val type = luaTypeToDataType(flags.toint())
-                            val numValue: Any = when (type) {
-                                "float", "double" -> value.todouble()
-                                else -> value.tolong()
-                            }
-                            if (MemoryFreezer.freeze(address, numValue, type)) count++
-                        }
+                    val source = table.get(i)
+                    if (!source.istable()) continue
+                    val item = source.checktable()
+                    val address = parseLuaAddress(item.get("address")) ?: continue
+                    val flagsValue = item.get("flags")
+                    val type = luaTypeToDataType(if (flagsValue.isnil()) 4 else flagsValue.toint())
+                    val value = parseLuaMemoryValue(item.get("value"), type)
+                        ?: MemoryEngine.readMemory(address, type)
+                        ?: continue
+                    val freeze = item.get("freeze").toboolean()
+                    val freezeTypeValue = item.get("freezeType")
+                    val freezeType = if (freezeTypeValue.isnil()) MemoryFreezer.FREEZE_NORMAL else freezeTypeValue.toint()
+                    val freezeFrom = parseLuaMemoryValue(item.get("freezeFrom"), type)
+                    val freezeTo = parseLuaMemoryValue(item.get("freezeTo"), type)
+                    val nameValue = item.get("name")
+                    val name = if (nameValue.isnil()) "" else nameValue.tojstring()
+
+                    val saved = mutableMapOf<String, Any?>(
+                        "address" to address,
+                        "value" to value,
+                        "type" to type,
+                        "name" to name,
+                        "freeze" to freeze,
+                        "freezeType" to freezeType,
+                        "freezeFrom" to freezeFrom,
+                        "freezeTo" to freezeTo,
+                    )
+                    val existing = savedList.indexOfFirst {
+                        (it["address"] as? Number)?.toLong() == address && it["type"] == type
+                    }
+                    if (existing >= 0) savedList[existing] = saved else savedList.add(saved)
+
+                    if (!freeze || MemoryFreezer.freeze(address, value, type, freezeType, freezeFrom, freezeTo)) {
+                        count++
                     }
                 }
-                outputLog.appendLine("🔒 已冻结 $count 个地址")
-                return LuaValue.valueOf(count)
+                outputLog.appendLine("💾 已加入保存列表 $count 条")
+                return if (count > 0 || table.length() == 0) LuaValue.TRUE else LuaValue.valueOf("no items were added")
             }
         })
 
@@ -467,13 +564,20 @@ object LuaEngine {
         gg.set("getListItems", object : org.luaj.vm2.lib.ZeroArgFunction() {
             override fun call(): LuaValue {
                 val output = LuaTable()
-                val items = MemoryFreezer.getFrozenAddresses()
-                for ((index, source) in items.withIndex()) {
+                for ((index, source) in savedList.withIndex()) {
+                    val address = (source["address"] as? Number)?.toLong() ?: continue
+                    val type = source["type"] as? String ?: "dword"
+                    val currentValue = MemoryEngine.readMemory(address, type) ?: source["value"]
+                    if (currentValue != null) source["value"] = currentValue
                     val item = LuaTable()
-                    item.set("address", luaValueOf(source["address"]))
-                    item.set("value", luaValueOf(source["value"]))
-                    item.set("flags", LuaValue.valueOf(dataTypeToLuaType(source["type"] as? String ?: "dword")))
-                    item.set("freeze", LuaValue.TRUE)
+                    item.set("address", luaValueOf(address))
+                    item.set("value", luaValueOf(currentValue))
+                    item.set("flags", LuaValue.valueOf(dataTypeToLuaType(type)))
+                    item.set("name", luaValueOf(source["name"] ?: ""))
+                    item.set("freeze", LuaValue.valueOf(MemoryFreezer.isFrozen(address)))
+                    item.set("freezeType", luaValueOf(source["freezeType"] ?: MemoryFreezer.FREEZE_NORMAL))
+                    item.set("freezeFrom", luaValueOf(source["freezeFrom"]))
+                    item.set("freezeTo", luaValueOf(source["freezeTo"]))
                     output.set(index + 1, item)
                 }
                 return output
@@ -483,17 +587,45 @@ object LuaEngine {
         // gg.removeListItems
         gg.set("removeListItems", object : OneArgFunction() {
             override fun call(arg: LuaValue): LuaValue {
-                if (!arg.istable()) return LuaValue.valueOf(0)
+                if (!arg.istable()) return LuaValue.valueOf("items must be a table")
                 val table = arg.checktable()
                 var count = 0
                 for (i in 1..table.length()) {
                     val source = table.get(i)
                     val addressValue = if (source.istable()) source.checktable().get("address") else source
                     val address = parseLuaAddress(addressValue) ?: continue
-                    if (MemoryFreezer.unfreeze(address)) count++
+                    val before = savedList.size
+                    savedList.removeAll { (it["address"] as? Number)?.toLong() == address }
+                    MemoryFreezer.unfreeze(address)
+                    if (savedList.size < before) count++
                 }
-                outputLog.appendLine("🔓 已从保存列表移除 $count 个地址")
-                return LuaValue.valueOf(count)
+                outputLog.appendLine("🗑️ 已从保存列表移除 $count 个地址")
+                return LuaValue.TRUE
+            }
+        })
+
+        // gg.processPause / gg.processResume / gg.isProcessPaused
+        gg.set("processPause", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                val pid = MemoryEngine.getAttachedPid() ?: return LuaValue.FALSE
+                val success = RootManager.executeRootCommand("kill -STOP $pid") != null
+                if (success) outputLog.appendLine("⏸️ 已暂停进程 $pid")
+                return LuaValue.valueOf(success)
+            }
+        })
+        gg.set("processResume", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                val pid = MemoryEngine.getAttachedPid() ?: return LuaValue.FALSE
+                val success = RootManager.executeRootCommand("kill -CONT $pid") != null
+                if (success) outputLog.appendLine("▶️ 已恢复进程 $pid")
+                return LuaValue.valueOf(success)
+            }
+        })
+        gg.set("isProcessPaused", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                val pid = MemoryEngine.getAttachedPid() ?: return LuaValue.FALSE
+                val state = RootManager.executeRootCommand("grep '^State:' /proc/$pid/status | cut -c 8")
+                return LuaValue.valueOf(state?.trim()?.startsWith("T") == true)
             }
         })
 
@@ -568,7 +700,7 @@ object LuaEngine {
         // gg.clearList
         gg.set("clearList", object : org.luaj.vm2.lib.ZeroArgFunction() {
             override fun call(): LuaValue {
-                frozenList.clear()
+                savedList.clear()
                 MemoryFreezer.clearAll()
                 outputLog.appendLine("🔓 已清空保存与冻结列表")
                 return LuaValue.NIL
@@ -590,6 +722,10 @@ object LuaEngine {
         gg.set("TYPE_QWORD", LuaValue.valueOf(8))
         gg.set("TYPE_FLOAT", LuaValue.valueOf(16))
         gg.set("TYPE_DOUBLE", LuaValue.valueOf(32))
+        gg.set("FREEZE_NORMAL", LuaValue.valueOf(MemoryFreezer.FREEZE_NORMAL))
+        gg.set("FREEZE_MAY_INCREASE", LuaValue.valueOf(MemoryFreezer.FREEZE_MAY_INCREASE))
+        gg.set("FREEZE_MAY_DECREASE", LuaValue.valueOf(MemoryFreezer.FREEZE_MAY_DECREASE))
+        gg.set("FREEZE_IN_RANGE", LuaValue.valueOf(MemoryFreezer.FREEZE_IN_RANGE))
         gg.set("REGION_ANONYMOUS", LuaValue.valueOf(1))
         gg.set("REGION_C_HEAP", LuaValue.valueOf(2))
         gg.set("REGION_JAVA_HEAP", LuaValue.valueOf(4))

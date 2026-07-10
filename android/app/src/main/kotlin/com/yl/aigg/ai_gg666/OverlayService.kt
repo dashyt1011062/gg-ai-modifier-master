@@ -79,6 +79,9 @@ class OverlayService : Service() {
         val label: String,
         val lastValue: String,
         val freeze: Boolean,
+        val freezeType: Int = MemoryFreezer.FREEZE_NORMAL,
+        val freezeFrom: String = "",
+        val freezeTo: String = "",
     )
 
     // AI 对话历史（持久化在内存中，防止切换后消失）
@@ -1823,6 +1826,10 @@ class OverlayService : Service() {
                     label = item.optString("label", "保存项 ${index + 1}"),
                     lastValue = item.optString("lastValue", "0"),
                     freeze = item.optBoolean("freeze", false),
+                    freezeType = item.optInt("freezeType", MemoryFreezer.FREEZE_NORMAL)
+                        .coerceIn(MemoryFreezer.FREEZE_NORMAL, MemoryFreezer.FREEZE_IN_RANGE),
+                    freezeFrom = item.optString("freezeFrom", ""),
+                    freezeTo = item.optString("freezeTo", ""),
                 )
             }.filterTo(mutableListOf()) { it.address > 0L && MemoryEngine.isSupportedType(it.type) }
         } catch (_: Exception) {
@@ -1840,6 +1847,9 @@ class OverlayService : Service() {
                 put("label", item.label)
                 put("lastValue", item.lastValue)
                 put("freeze", item.freeze)
+                put("freezeType", item.freezeType)
+                put("freezeFrom", item.freezeFrom)
+                put("freezeTo", item.freezeTo)
             })
         }
         getSharedPreferences("gg_overlay", Context.MODE_PRIVATE).edit()
@@ -1875,6 +1885,7 @@ class OverlayService : Service() {
                 label = "地址 $addressText",
                 lastValue = result["value"]?.toString() ?: "0",
                 freeze = MemoryFreezer.isFrozen(address),
+                freezeType = MemoryFreezer.getFreezeType(address) ?: MemoryFreezer.FREEZE_NORMAL,
             )
             val index = items.indexOfFirst { savedItemKey(it) == savedItemKey(candidate) }
             if (index >= 0) {
@@ -1888,6 +1899,156 @@ class OverlayService : Service() {
 
         persistSavedMemoryItems(items)
         return changed
+    }
+
+    private fun freezeModeLabel(mode: Int): String {
+        return when (mode) {
+            MemoryFreezer.FREEZE_MAY_INCREASE -> "只许增大"
+            MemoryFreezer.FREEZE_MAY_DECREASE -> "只许减小"
+            MemoryFreezer.FREEZE_IN_RANGE -> "限制范围"
+            else -> "固定数值"
+        }
+    }
+
+    private fun showSavedFreezeSettingsPanel(item: SavedMemoryItem) {
+        makeDraggablePanel("冻结设置", { content ->
+            content.addView(TextView(this).apply {
+                text = "${item.label}\n0x${item.address.toString(16).uppercase()}  ·  ${item.type.uppercase()}"
+                setTextColor(Color.parseColor("#CAC4D0"))
+                textSize = 10f
+                typeface = android.graphics.Typeface.MONOSPACE
+                setPadding(dp(6), dp(3), dp(6), dp(7))
+            })
+
+            var selectedMode = item.freezeType
+            val modeGroup = android.widget.RadioGroup(this).apply {
+                orientation = android.widget.RadioGroup.VERTICAL
+                setPadding(dp(5), dp(3), dp(5), dp(3))
+                background = aggMenuDrawable(Color.parseColor("#25222B"), 9, Color.parseColor("#49454F"))
+            }
+            val modes = listOf(
+                MemoryFreezer.FREEZE_NORMAL to "固定数值 · 不允许变化",
+                MemoryFreezer.FREEZE_MAY_INCREASE to "只许增大 · 下降时恢复",
+                MemoryFreezer.FREEZE_MAY_DECREASE to "只许减小 · 上升时恢复",
+                MemoryFreezer.FREEZE_IN_RANGE to "限制范围 · 超出时拉回边界",
+            )
+            for ((mode, label) in modes) {
+                modeGroup.addView(android.widget.RadioButton(this).apply {
+                    id = View.generateViewId()
+                    tag = mode
+                    text = label
+                    textSize = 10f
+                    setTextColor(Color.parseColor("#E6E0E9"))
+                    buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#D0BCFF"))
+                    isChecked = mode == selectedMode
+                    setOnCheckedChangeListener { _, checked -> if (checked) selectedMode = mode }
+                })
+            }
+            content.addView(modeGroup)
+
+            val rangeRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(7), 0, 0)
+            }
+            fun rangeInput(hintText: String, initial: String): EditText {
+                return EditText(this).apply {
+                    hint = hintText
+                    setText(initial)
+                    setSingleLine(true)
+                    textSize = 11f
+                    setTextColor(Color.parseColor("#F3EDF7"))
+                    setHintTextColor(Color.parseColor("#938F99"))
+                    inputType = android.text.InputType.TYPE_CLASS_NUMBER or
+                            android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                            android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+                    setPadding(dp(10), 0, dp(10), 0)
+                    background = aggMenuDrawable(Color.parseColor("#25222B"), 8, Color.parseColor("#49454F"))
+                }
+            }
+            val fromInput = rangeInput("范围下限", item.freezeFrom.ifBlank { item.lastValue })
+            val toInput = rangeInput("范围上限", item.freezeTo.ifBlank { item.lastValue })
+            rangeRow.addView(fromInput, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(3) })
+            rangeRow.addView(toInput, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(3) })
+            content.addView(rangeRow)
+
+            val state = TextView(this).apply {
+                text = "区间输入仅在“限制范围”模式生效"
+                setTextColor(Color.parseColor("#938F99"))
+                textSize = 9f
+                setPadding(dp(4), dp(5), dp(4), dp(2))
+            }
+            content.addView(state)
+
+            fun panelButton(label: String, accent: Boolean = false, action: () -> Unit): TextView {
+                return TextView(this).apply {
+                    text = label
+                    gravity = Gravity.CENTER
+                    textSize = 10f
+                    setTextColor(if (accent) Color.parseColor("#231A2E") else Color.parseColor("#E6E0E9"))
+                    setTypeface(null, if (accent) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                    background = aggMenuDrawable(
+                        if (accent) Color.parseColor("#D0BCFF") else Color.parseColor("#302D35"),
+                        9,
+                        if (accent) Color.parseColor("#E8DEF8") else Color.parseColor("#49454F"),
+                    )
+                    setOnClickListener { action() }
+                }
+            }
+
+            val actions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(7), 0, 0)
+            }
+            actions.addView(panelButton("取消") { showSavedListPanel() }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginEnd = dp(4) })
+            actions.addView(panelButton("启用冻结", true) {
+                val current = MemoryEngine.readMemory(item.address, item.type)
+                    ?: parseMemoryValue(item.lastValue, item.type)
+                if (current == null) {
+                    state.text = "无法读取或解析当前值"
+                    state.setTextColor(Color.parseColor("#FFB4AB"))
+                    return@panelButton
+                }
+                val from = if (selectedMode == MemoryFreezer.FREEZE_IN_RANGE) {
+                    parseMemoryValue(fromInput.text.toString().trim(), item.type)
+                } else null
+                val to = if (selectedMode == MemoryFreezer.FREEZE_IN_RANGE) {
+                    parseMemoryValue(toInput.text.toString().trim(), item.type)
+                } else null
+                if (selectedMode == MemoryFreezer.FREEZE_IN_RANGE && (from == null || to == null)) {
+                    state.text = "请输入有效的范围上下限"
+                    state.setTextColor(Color.parseColor("#FFB4AB"))
+                    return@panelButton
+                }
+                state.text = "正在启用 ${freezeModeLabel(selectedMode)}…"
+                state.setTextColor(Color.parseColor("#D0BCFF"))
+                Thread {
+                    val success = MemoryFreezer.freeze(item.address, current, item.type, selectedMode, from, to)
+                    if (success) {
+                        val items = loadSavedMemoryItems()
+                        val index = items.indexOfFirst { savedItemKey(it) == savedItemKey(item) }
+                        if (index >= 0) {
+                            items[index] = item.copy(
+                                lastValue = current.toString(),
+                                freeze = true,
+                                freezeType = selectedMode,
+                                freezeFrom = from?.toString() ?: "",
+                                freezeTo = to?.toString() ?: "",
+                            )
+                            persistSavedMemoryItems(items)
+                        }
+                    }
+                    handler.post {
+                        Toast.makeText(this@OverlayService, if (success) "已启用 ${freezeModeLabel(selectedMode)}" else "冻结失败", Toast.LENGTH_SHORT).show()
+                        if (success) showSavedListPanel()
+                        else {
+                            state.text = "冻结失败，请检查进程、地址和值类型"
+                            state.setTextColor(Color.parseColor("#FFB4AB"))
+                        }
+                    }
+                }.start()
+            }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(4) })
+            content.addView(actions)
+        }, 380, 440, onBack = { showSavedListPanel() }, titleIcon = R.drawable.ic_agg_lock)
     }
 
     private fun showSavedListPanel() {
@@ -2020,8 +2181,14 @@ class OverlayService : Service() {
                                 setTypeface(null, android.graphics.Typeface.BOLD)
                             })
                             addView(TextView(this@OverlayService).apply {
-                                text = "$addressText  ·  ${item.type.uppercase()}"
-                                setTextColor(Color.parseColor("#938F99"))
+                                text = buildString {
+                                    append("$addressText  ·  ${item.type.uppercase()}")
+                                    if (item.freeze || isFrozen) append("  ·  ${freezeModeLabel(item.freezeType)}")
+                                    if (item.freezeType == MemoryFreezer.FREEZE_IN_RANGE && item.freezeFrom.isNotBlank() && item.freezeTo.isNotBlank()) {
+                                        append(" [${item.freezeFrom}, ${item.freezeTo}]")
+                                    }
+                                }
+                                setTextColor(if (item.freeze || isFrozen) Color.parseColor("#B69DF8") else Color.parseColor("#938F99"))
                                 textSize = 9.5f
                                 typeface = android.graphics.Typeface.MONOSPACE
                                 setPadding(0, dp(2), 0, 0)
@@ -2044,26 +2211,20 @@ class OverlayService : Service() {
                     operations.addView(itemAction(R.drawable.ic_agg_edit, "重命名", "#E8DEF8") {
                         showRenameSavedItemPanel(item)
                     }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(3) })
-                    operations.addView(itemAction(R.drawable.ic_agg_lock, if (isFrozen) "解冻" else "冻结", if (isFrozen) "#FFB4AB" else "#C8F7DC") {
+                    operations.addView(itemAction(R.drawable.ic_agg_lock, if (isFrozen) "解冻" else "冻结设置", if (isFrozen) "#FFB4AB" else "#C8F7DC") {
                         if (!canOperate) {
                             Toast.makeText(this@OverlayService, "请先附加对应进程", Toast.LENGTH_SHORT).show()
                             return@itemAction
                         }
+                        if (!isFrozen) {
+                            showSavedFreezeSettingsPanel(item.copy(lastValue = liveValue))
+                            return@itemAction
+                        }
                         Thread {
-                            val success = if (isFrozen) {
-                                MemoryFreezer.unfreeze(item.address)
-                            } else {
-                                val value = MemoryEngine.readMemory(item.address, item.type)
-                                    ?: parseMemoryValue(item.lastValue, item.type)
-                                value != null && MemoryFreezer.freeze(item.address, value, item.type)
-                            }
-                            if (success) replaceItem(item, item.copy(freeze = !isFrozen, lastValue = liveValue))
+                            val success = MemoryFreezer.unfreeze(item.address)
+                            if (success) replaceItem(item, item.copy(freeze = false, lastValue = liveValue))
                             handler.post {
-                                Toast.makeText(
-                                    this@OverlayService,
-                                    if (success) (if (isFrozen) "已解冻" else "已冻结") else "操作失败",
-                                    Toast.LENGTH_SHORT,
-                                ).show()
+                                Toast.makeText(this@OverlayService, if (success) "已解冻" else "操作失败", Toast.LENGTH_SHORT).show()
                                 render()
                             }
                         }.start()
@@ -2132,7 +2293,9 @@ class OverlayService : Service() {
                     for (item in items) {
                         val value = MemoryEngine.readMemory(item.address, item.type)
                             ?: parseMemoryValue(item.lastValue, item.type)
-                        if (value != null && MemoryFreezer.freeze(item.address, value, item.type)) count++
+                        val from = item.freezeFrom.takeIf { it.isNotBlank() }?.let { parseMemoryValue(it, item.type) }
+                        val to = item.freezeTo.takeIf { it.isNotBlank() }?.let { parseMemoryValue(it, item.type) }
+                        if (value != null && MemoryFreezer.freeze(item.address, value, item.type, item.freezeType, from, to)) count++
                     }
                     handler.post {
                         Toast.makeText(this@OverlayService, "已恢复冻结 $count/${items.size} 条", Toast.LENGTH_SHORT).show()
@@ -4589,21 +4752,19 @@ class OverlayService : Service() {
             content.addView(previewCard)
 
             val input = EditText(this).apply {
-                hint = "输入统一的新值"
+                hint = "输入新值；多个值用分号分隔"
                 setTextColor(Color.parseColor("#F3EDF7"))
                 setHintTextColor(Color.parseColor("#938F99"))
                 textSize = 13f
                 setSingleLine(true)
-                inputType = android.text.InputType.TYPE_CLASS_NUMBER or
-                        android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or
-                        android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+                inputType = android.text.InputType.TYPE_CLASS_TEXT
                 setPadding(dp(12), 0, dp(12), 0)
                 background = aggMenuDrawable(Color.parseColor("#25222B"), 9, Color.parseColor("#49454F"))
             }
             content.addView(input, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)).apply { topMargin = dp(7) })
 
             val state = TextView(this).apply {
-                text = "每条结果会按自己的数据类型解析并写入"
+                text = "单值应用到全部；7;13;43 会按顺序循环写入"
                 setTextColor(Color.parseColor("#938F99"))
                 textSize = 9.5f
                 setPadding(dp(3), dp(5), dp(3), dp(3))
@@ -4611,8 +4772,8 @@ class OverlayService : Service() {
             content.addView(state)
 
             fun applyBatch(freezeAfter: Boolean) {
-                val raw = input.text.toString().trim()
-                if (raw.isEmpty()) {
+                val rawValues = input.text.toString().split(';').map { it.trim() }.filter { it.isNotEmpty() }
+                if (rawValues.isEmpty()) {
                     state.text = "请输入新值"
                     state.setTextColor(Color.parseColor("#FFB4AB"))
                     return
@@ -4623,7 +4784,7 @@ class OverlayService : Service() {
                 Thread {
                     var successCount = 0
                     val updated = mutableMapOf<Long, Pair<Any, String>>()
-                    for (item in selectedResults) {
+                    for ((position, item) in selectedResults.withIndex()) {
                         val address = (item["addressInt"] as? Number)?.toLong()
                             ?: (item["address"] as? String)
                                 ?.removePrefix("0x")
@@ -4633,7 +4794,7 @@ class OverlayService : Service() {
                         val type = (item["type"] as? String)
                             ?.takeIf { MemoryEngine.isSupportedType(it) }
                             ?: searchDataType
-                        val parsed = parseMemoryValue(raw, type) ?: continue
+                        val parsed = parseMemoryValue(rawValues[position % rawValues.size], type) ?: continue
                         var success = MemoryEngine.writeMemory(address, parsed, type)
                         if (success && (freezeAfter || MemoryFreezer.isFrozen(address))) {
                             success = MemoryFreezer.freeze(address, parsed, type)
