@@ -6395,6 +6395,18 @@ class OverlayService : Service() {
                 dp(48),
             ))
             body.addView(nearbyRow)
+            if (currentSearchMode != "fuzzy") {
+                val triggerLabel = when (currentSearchMode) {
+                    "addr" -> "搜索地址"
+                    "machine" -> "搜索特征码"
+                    "nearby" -> "附近搜索"
+                    else -> if (searchResults.isEmpty()) "搜索" else "再次搜索"
+                }
+                body.addView(button(triggerLabel) { performKnownSearch() }, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(48),
+                ).apply { topMargin = dp(5) })
+            }
 
             val footer = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             footer.addView(button("取消") { showAggSearchTab() }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
