@@ -1325,7 +1325,7 @@ class OverlayService : Service() {
                 setTextColor(Color.parseColor("#F3EDF7"))
                 setHintTextColor(Color.parseColor("#938F99"))
                 textSize = 12f
-                singleLine = true
+                setSingleLine(true)
                 setPadding(dp(12), 0, dp(10), 0)
                 background = aggMenuDrawable(Color.parseColor("#25222B"), 10, Color.parseColor("#49454F"))
                 layoutParams = LinearLayout.LayoutParams(0, dp(40), 1f)
@@ -2110,7 +2110,7 @@ class OverlayService : Service() {
                 setTextColor(Color.parseColor("#F3EDF7"))
                 setHintTextColor(Color.parseColor("#938F99"))
                 textSize = 12f
-                singleLine = true
+                setSingleLine(true)
                 inputType = if (numeric) {
                     android.text.InputType.TYPE_CLASS_NUMBER or
                             android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or
@@ -2929,8 +2929,8 @@ class OverlayService : Service() {
                 setTextColor(Color.parseColor("#F3EDF7"))
                 setHintTextColor(Color.parseColor("#938F99"))
                 textSize = 13f
-                singleLine = true
-                selectAllOnFocus = true
+                setSingleLine(true)
+                setSelectAllOnFocus(true)
                 inputType = android.text.InputType.TYPE_CLASS_NUMBER or
                         android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or
                         android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
@@ -3137,7 +3137,7 @@ class OverlayService : Service() {
                 setTextColor(Color.parseColor("#F3EDF7"))
                 setHintTextColor(Color.parseColor("#938F99"))
                 textSize = 13f
-                singleLine = true
+                setSingleLine(true)
                 inputType = android.text.InputType.TYPE_CLASS_NUMBER or
                         android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or
                         android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
