@@ -674,6 +674,23 @@ object MemoryEngine {
     // 兼容旧调用
     fun readMemory(address: Int, type: String): Any? = readMemory(address.toLong(), type)
 
+    fun searchAddress(address: Long, type: String): List<Map<String, Any>> {
+        if (address <= 0L || !isSupportedType(type) || attachedPid == null || !isAttachedProcessAlive()) {
+            return emptyList()
+        }
+        val value = readMemory(address, type) ?: return emptyList()
+        val bytes = readBytes(address, getTypeSize(type)) ?: byteArrayOf()
+        return listOf(
+            mapOf(
+                "address" to "0x${address.toString(16).uppercase()}",
+                "addressInt" to address,
+                "value" to value,
+                "type" to type,
+                "machineCode" to bytes.joinToString(" ") { String.format("%02X", it) },
+            )
+        )
+    }
+
     fun writeMemory(address: Long, value: Any, type: String): Boolean {
         val pid = attachedPid ?: return false
         if (address <= 0L || !isSupportedType(type) || !isAttachedProcessAlive()) return false
