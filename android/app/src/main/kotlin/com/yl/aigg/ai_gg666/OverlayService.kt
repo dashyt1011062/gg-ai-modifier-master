@@ -447,6 +447,8 @@ class OverlayService : Service() {
             "process" -> showProcessPanel()
             "search" -> showSearchPanel()
             "editor" -> showMemoryEditorPanel()
+            "process_control" -> showProcessControlPanel()
+            "memory_tools" -> showMemoryToolsPanel()
             "saved" -> showSavedListPanel()
             "chat" -> showAIChatPanel()
             "script" -> showScriptPanel()
@@ -855,8 +857,8 @@ class OverlayService : Service() {
             setPadding(0, dp(6), 0, 0)
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
-        row2.addView(toolCard(R.drawable.ic_agg_ai, "AI 助手", "分析结果并生成操作建议", "#FFD8A8") { showAIChatPanel() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginEnd = dp(3) })
-        row2.addView(toolCard(R.drawable.ic_agg_script, "脚本管理", "运行和管理 Lua 自动化脚本", "#C8F7DC") { showScriptPanel() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginStart = dp(3) })
+        row2.addView(toolCard(R.drawable.ic_agg_apps, "进程控制", "暂停、恢复、切换或结束目标", "#FFD8A8") { showProcessControlPanel() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginEnd = dp(3) })
+        row2.addView(toolCard(R.drawable.ic_agg_memory, "内存工具", "复制内存和转储地址范围", "#C8F7DC") { showMemoryToolsPanel() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginStart = dp(3) })
         workspace.addView(row2)
 
         val footer = LinearLayout(this).apply {
@@ -1328,6 +1330,367 @@ class OverlayService : Service() {
 
     // ==================== 进程面板 ====================
 
+    private fun isTargetProcessPaused(pid: Int): Boolean {
+        val state = RootManager.executeRootCommand("grep '^State:' /proc/$pid/status | cut -c 8")
+        return state?.trim()?.startsWith("T") == true
+    }
+
+    private fun setTargetProcessPaused(pid: Int, paused: Boolean): Boolean {
+        val signal = if (paused) "STOP" else "CONT"
+        return RootManager.executeRootCommand("kill -$signal $pid") != null
+    }
+
+    private fun showProcessControlPanel() {
+        val pid = MemoryEngine.getAttachedPid()
+        if (pid == null || !MemoryEngine.isAttachedProcessAlive()) {
+            showProcessPanel()
+            return
+        }
+        saveLastPanel("process_control")
+        makeDraggablePanel("进程控制", { content ->
+            val prefs = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
+            val processName = prefs.getString("attached_name", "目标进程") ?: "目标进程"
+            val packageName = prefs.getString("attached_package", "") ?: ""
+            val statusCard = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                background = aggMenuDrawable(Color.parseColor("#25222B"), 11, Color.parseColor("#49454F"))
+            }
+            val title = TextView(this).apply {
+                text = processName
+                setTextColor(Color.parseColor("#F3EDF7"))
+                textSize = 13f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            val details = TextView(this).apply {
+                text = "$packageName  ·  PID $pid"
+                setTextColor(Color.parseColor("#CAC4D0"))
+                textSize = 9.5f
+                setPadding(0, dp(3), 0, 0)
+                typeface = android.graphics.Typeface.MONOSPACE
+            }
+            val stateView = TextView(this).apply {
+                textSize = 11f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                setPadding(0, dp(7), 0, 0)
+            }
+            statusCard.addView(title)
+            statusCard.addView(details)
+            statusCard.addView(stateView)
+            content.addView(statusCard)
+
+            fun refreshState() {
+                Thread {
+                    val alive = MemoryEngine.isAttachedProcessAlive(force = true)
+                    val paused = alive && isTargetProcessPaused(pid)
+                    handler.post {
+                        stateView.text = when {
+                            !alive -> "● 进程已结束"
+                            paused -> "● 已暂停"
+                            else -> "● 正在运行"
+                        }
+                        stateView.setTextColor(
+                            when {
+                                !alive -> Color.parseColor("#FFB4AB")
+                                paused -> Color.parseColor("#FFD8A8")
+                                else -> Color.parseColor("#C8F7DC")
+                            }
+                        )
+                    }
+                }.start()
+            }
+
+            fun controlButton(label: String, danger: Boolean = false, accent: Boolean = false, action: (TextView) -> Unit): TextView {
+                return TextView(this).apply {
+                    text = label
+                    gravity = Gravity.CENTER
+                    textSize = 10.5f
+                    setTypeface(null, if (accent) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                    setTextColor(
+                        when {
+                            danger -> Color.parseColor("#FFB4AB")
+                            accent -> Color.parseColor("#231A2E")
+                            else -> Color.parseColor("#E6E0E9")
+                        }
+                    )
+                    background = aggMenuDrawable(
+                        when {
+                            danger -> Color.parseColor("#35232A")
+                            accent -> Color.parseColor("#D0BCFF")
+                            else -> Color.parseColor("#302D35")
+                        },
+                        9,
+                        when {
+                            danger -> Color.parseColor("#68404A")
+                            accent -> Color.parseColor("#E8DEF8")
+                            else -> Color.parseColor("#49454F")
+                        },
+                    )
+                    setOnClickListener { action(this) }
+                }
+            }
+
+            val row1 = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(8), 0, 0)
+            }
+            row1.addView(controlButton("暂停进程") { button ->
+                button.text = "正在暂停…"
+                Thread {
+                    val success = setTargetProcessPaused(pid, true)
+                    handler.post {
+                        Toast.makeText(this@OverlayService, if (success) "进程已暂停" else "暂停失败", Toast.LENGTH_SHORT).show()
+                        button.text = "暂停进程"
+                        refreshState()
+                    }
+                }.start()
+            }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(3) })
+            row1.addView(controlButton("恢复运行", accent = true) { button ->
+                button.text = "正在恢复…"
+                Thread {
+                    val success = setTargetProcessPaused(pid, false)
+                    handler.post {
+                        Toast.makeText(this@OverlayService, if (success) "进程已恢复" else "恢复失败", Toast.LENGTH_SHORT).show()
+                        button.text = "恢复运行"
+                        refreshState()
+                    }
+                }.start()
+            }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(3) })
+            content.addView(row1)
+
+            val row2 = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(6), 0, 0)
+            }
+            row2.addView(controlButton("切换暂停状态") { button ->
+                button.text = "正在切换…"
+                Thread {
+                    val success = setTargetProcessPaused(pid, !isTargetProcessPaused(pid))
+                    handler.post {
+                        Toast.makeText(this@OverlayService, if (success) "状态已切换" else "切换失败", Toast.LENGTH_SHORT).show()
+                        button.text = "切换暂停状态"
+                        refreshState()
+                    }
+                }.start()
+            }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(3) })
+            row2.addView(controlButton("刷新状态") { refreshState() }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(3) })
+            content.addView(row2)
+
+            var killArmed = false
+            val killButton = controlButton("结束目标进程", danger = true) { button ->
+                if (!killArmed) {
+                    killArmed = true
+                    button.text = "再次点击确认结束"
+                    handler.postDelayed({
+                        killArmed = false
+                        if (button.isAttachedToWindow) button.text = "结束目标进程"
+                    }, 3000L)
+                    return@controlButton
+                }
+                Thread {
+                    val success = RootManager.executeRootCommand("kill -KILL $pid") != null
+                    if (success) {
+                        MemoryEngine.detachProcess()
+                        clearAttachedProcessInfo()
+                        searchResults = emptyList()
+                        selectedIndices.clear()
+                    }
+                    handler.post {
+                        Toast.makeText(this@OverlayService, if (success) "目标进程已结束" else "结束进程失败", Toast.LENGTH_SHORT).show()
+                        if (success) showProcessPanel() else refreshState()
+                    }
+                }.start()
+            }
+            content.addView(killButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)).apply { topMargin = dp(8) })
+
+            content.addView(TextView(this).apply {
+                text = "暂停使用 SIGSTOP，恢复使用 SIGCONT。进程暂停后内存搜索和读写可能等待目标恢复。"
+                setTextColor(Color.parseColor("#938F99"))
+                textSize = 9f
+                setPadding(dp(5), dp(8), dp(5), dp(2))
+            })
+            refreshState()
+        }, 370, 390, onBack = { showMainMenu() }, titleIcon = R.drawable.ic_agg_apps)
+    }
+
+    private fun showMemoryToolsPanel() {
+        val pid = MemoryEngine.getAttachedPid()
+        if (pid == null || !MemoryEngine.isAttachedProcessAlive()) {
+            showProcessPanel()
+            return
+        }
+        saveLastPanel("memory_tools")
+        makeDraggablePanel("内存工具", { content ->
+            fun parseAddress(text: String): Long? {
+                val raw = text.trim()
+                return when {
+                    raw.startsWith("0x", ignoreCase = true) -> raw.substring(2).toLongOrNull(16)
+                    raw.matches(Regex("[0-9A-Fa-f]{6,}")) -> raw.toLongOrNull(16)
+                    else -> raw.toLongOrNull()
+                }
+            }
+
+            fun toolInput(hintText: String, initial: String = ""): EditText {
+                return EditText(this).apply {
+                    hint = hintText
+                    setText(initial)
+                    setSingleLine(true)
+                    textSize = 10.5f
+                    setTextColor(Color.parseColor("#F3EDF7"))
+                    setHintTextColor(Color.parseColor("#938F99"))
+                    inputType = android.text.InputType.TYPE_CLASS_TEXT
+                    setPadding(dp(10), 0, dp(10), 0)
+                    background = aggMenuDrawable(Color.parseColor("#25222B"), 8, Color.parseColor("#49454F"))
+                }
+            }
+
+            fun sectionTitle(textValue: String, subtitle: String): LinearLayout {
+                return LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(3), dp(4), dp(3), dp(5))
+                    addView(TextView(this@OverlayService).apply {
+                        text = textValue
+                        setTextColor(Color.parseColor("#F3EDF7"))
+                        textSize = 11.5f
+                        setTypeface(null, android.graphics.Typeface.BOLD)
+                    })
+                    addView(TextView(this@OverlayService).apply {
+                        text = subtitle
+                        setTextColor(Color.parseColor("#938F99"))
+                        textSize = 8.8f
+                    })
+                }
+            }
+
+            fun actionButton(label: String, accent: Boolean = false, action: () -> Unit): TextView {
+                return TextView(this).apply {
+                    text = label
+                    gravity = Gravity.CENTER
+                    textSize = 10f
+                    setTypeface(null, if (accent) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                    setTextColor(if (accent) Color.parseColor("#231A2E") else Color.parseColor("#E6E0E9"))
+                    background = aggMenuDrawable(
+                        if (accent) Color.parseColor("#D0BCFF") else Color.parseColor("#302D35"),
+                        9,
+                        if (accent) Color.parseColor("#E8DEF8") else Color.parseColor("#49454F"),
+                    )
+                    setOnClickListener { action() }
+                }
+            }
+
+            val region = MemoryEngine.getMemoryRegions().firstOrNull()
+            val defaultStart = (region?.get("startAddress") as? Number)?.toLong()?.let { "0x${it.toString(16).uppercase()}" } ?: ""
+            val defaultEnd = (region?.get("endAddress") as? Number)?.toLong()?.let { "0x${it.toString(16).uppercase()}" } ?: ""
+            val status = TextView(this).apply {
+                text = "PID $pid · 单次复制上限 16 MB，转储上限 256 MB"
+                setTextColor(Color.parseColor("#CAC4D0"))
+                textSize = 9.5f
+                setPadding(dp(5), dp(2), dp(5), dp(6))
+            }
+            content.addView(status)
+
+            val copyCard = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(8), dp(6), dp(8), dp(8))
+                background = aggMenuDrawable(Color.parseColor("#211F26"), 10, Color.parseColor("#49454F"))
+            }
+            copyCard.addView(sectionTitle("复制内存", "把一段原始字节复制到另一个地址"))
+            val copyAddressRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val copyFrom = toolInput("来源地址", defaultStart)
+            val copyTo = toolInput("目标地址")
+            copyAddressRow.addView(copyFrom, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(3) })
+            copyAddressRow.addView(copyTo, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3) })
+            copyCard.addView(copyAddressRow)
+            val copyFooter = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(6), 0, 0)
+            }
+            val copyBytes = toolInput("字节数，例如 4096", "4096")
+            copyFooter.addView(copyBytes, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(5) })
+            copyFooter.addView(actionButton("执行复制", true) {
+                val from = parseAddress(copyFrom.text.toString())
+                val to = parseAddress(copyTo.text.toString())
+                val bytes = copyBytes.text.toString().trim().toIntOrNull()
+                if (from == null || to == null || bytes == null || bytes !in 1..(16 * 1024 * 1024)) {
+                    status.text = "复制参数无效：检查来源、目标和字节数"
+                    status.setTextColor(Color.parseColor("#FFB4AB"))
+                    return@actionButton
+                }
+                status.text = "正在复制 $bytes 字节…"
+                status.setTextColor(Color.parseColor("#D0BCFF"))
+                Thread {
+                    val success = MemoryEngine.copyMemory(from, to, bytes)
+                    handler.post {
+                        status.text = if (success) "复制完成：0x${from.toString(16).uppercase()} → 0x${to.toString(16).uppercase()}，$bytes 字节" else "复制失败，请检查地址是否可读写"
+                        status.setTextColor(if (success) Color.parseColor("#C8F7DC") else Color.parseColor("#FFB4AB"))
+                    }
+                }.start()
+            }, LinearLayout.LayoutParams(dp(92), dp(40)))
+            copyCard.addView(copyFooter)
+            content.addView(copyCard)
+
+            val dumpCard = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(8), dp(6), dp(8), dp(8))
+                background = aggMenuDrawable(Color.parseColor("#211F26"), 10, Color.parseColor("#49454F"))
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(7) }
+            }
+            dumpCard.addView(sectionTitle("转储内存", "保存指定地址范围的原始二进制文件"))
+            val dumpAddressRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val dumpFrom = toolInput("起始地址", defaultStart)
+            val dumpTo = toolInput("结束地址", defaultEnd)
+            dumpAddressRow.addView(dumpFrom, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(3) })
+            dumpAddressRow.addView(dumpTo, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3) })
+            dumpCard.addView(dumpAddressRow)
+            val dumpFooter = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(6), 0, 0)
+            }
+            val dumpName = toolInput("文件名", "memory_${System.currentTimeMillis()}.bin")
+            dumpFooter.addView(dumpName, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(5) })
+            dumpFooter.addView(actionButton("开始转储", true) {
+                val from = parseAddress(dumpFrom.text.toString())
+                val to = parseAddress(dumpTo.text.toString())
+                val safeName = dumpName.text.toString().trim().replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "memory_dump.bin" }
+                if (from == null || to == null || to <= from || to - from > 256L * 1024L * 1024L) {
+                    status.text = "转储范围无效，范围必须大于 0 且不超过 256 MB"
+                    status.setTextColor(Color.parseColor("#FFB4AB"))
+                    return@actionButton
+                }
+                val directory = getExternalFilesDir("dumps") ?: java.io.File(filesDir, "dumps")
+                val outputFile = java.io.File(directory, safeName)
+                status.text = "正在转储 ${(to - from) / 1024} KB…"
+                status.setTextColor(Color.parseColor("#D0BCFF"))
+                Thread {
+                    val written = MemoryEngine.dumpMemory(from, to, outputFile)
+                    handler.post {
+                        if (written >= 0L) {
+                            status.text = "已转储 $written 字节\n${outputFile.absolutePath}"
+                            status.setTextColor(Color.parseColor("#C8F7DC"))
+                            copyToClipboard(outputFile.absolutePath)
+                            Toast.makeText(this@OverlayService, "路径已复制", Toast.LENGTH_SHORT).show()
+                        } else {
+                            status.text = "转储失败，请检查地址范围和读取权限"
+                            status.setTextColor(Color.parseColor("#FFB4AB"))
+                        }
+                    }
+                }.start()
+            }, LinearLayout.LayoutParams(dp(92), dp(40)))
+            dumpCard.addView(dumpFooter)
+            content.addView(dumpCard)
+
+            val bottom = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(7), 0, 0)
+            }
+            bottom.addView(actionButton("内存编辑器") { showMemoryEditorPanel() }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginEnd = dp(3) })
+            bottom.addView(actionButton("刷新区域") { showMemoryToolsPanel() }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(3) })
+            content.addView(bottom)
+        }, 400, 540, onBack = { showMainMenu() }, titleIcon = R.drawable.ic_agg_memory)
+    }
+
     private fun showProcessPanel() {
         saveLastPanel("process")
         makeDraggablePanel("选择进程", { content ->
@@ -1392,10 +1755,10 @@ class OverlayService : Service() {
                 setPadding(dp(4), dp(5), dp(4), dp(1))
             }
             footer.addView(TextView(this).apply {
-                text = "分离当前进程"
+                text = "分离"
                 gravity = Gravity.CENTER
                 setTextColor(Color.parseColor("#FFB4AB"))
-                textSize = 11f
+                textSize = 10f
                 background = aggMenuDrawable(Color.parseColor("#35232A"), 9, Color.parseColor("#68404A"))
                 setOnClickListener {
                     MemoryEngine.detachProcess()
@@ -1405,7 +1768,18 @@ class OverlayService : Service() {
                     status.text = "已分离进程"
                     loadProcs(list, status, queryInput.text.toString())
                 }
-            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginEnd = dp(4) })
+            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginEnd = dp(3) })
+            footer.addView(TextView(this).apply {
+                text = "进程控制"
+                gravity = Gravity.CENTER
+                setTextColor(Color.parseColor("#E6E0E9"))
+                textSize = 10f
+                background = aggMenuDrawable(Color.parseColor("#302D35"), 9, Color.parseColor("#49454F"))
+                setOnClickListener {
+                    if (MemoryEngine.getAttachedPid() != null) showProcessControlPanel()
+                    else status.text = "请先选择一个运行中的应用"
+                }
+            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(3); marginEnd = dp(3) })
             footer.addView(TextView(this).apply {
                 text = "进入搜索"
                 gravity = Gravity.CENTER
@@ -1417,7 +1791,7 @@ class OverlayService : Service() {
                     if (MemoryEngine.getAttachedPid() != null) showSearchPanel()
                     else status.text = "请先选择一个运行中的应用"
                 }
-            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(4) })
+            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(3) })
             content.addView(footer)
 
             loadProcs(list, status)

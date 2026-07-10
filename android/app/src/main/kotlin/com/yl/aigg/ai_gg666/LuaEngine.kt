@@ -7,6 +7,8 @@ import android.os.Handler
 import android.os.Looper
 import android.view.WindowManager
 import android.widget.Toast
+import org.json.JSONArray
+import org.json.JSONObject
 import org.luaj.vm2.LuaTable
 import org.luaj.vm2.LuaValue
 import org.luaj.vm2.Varargs
@@ -241,6 +243,58 @@ object LuaEngine {
             MemoryFreezer.FREEZE_IN_RANGE -> "inRange"
             else -> "normal"
         }
+    }
+
+    private fun targetPackageKey(): String {
+        val prefs = context?.getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
+        return prefs?.getString("attached_package", "")
+            ?.takeIf { it.isNotBlank() }
+            ?: "pid:${MemoryEngine.getAttachedPid() ?: 0}"
+    }
+
+    private fun loadPersistentSavedList(): MutableList<MutableMap<String, Any?>> {
+        val prefs = context?.getSharedPreferences("gg_overlay", Context.MODE_PRIVATE) ?: return savedList
+        val raw = prefs.getString("saved_memory_items", "[]") ?: "[]"
+        return try {
+            val array = JSONArray(raw)
+            MutableList(array.length()) { index ->
+                val item = array.getJSONObject(index)
+                mutableMapOf<String, Any?>(
+                    "address" to (item.optString("address").toLongOrNull() ?: item.optLong("address", 0L)),
+                    "type" to item.optString("type", "dword"),
+                    "packageName" to item.optString("packageName", ""),
+                    "name" to item.optString("label", "保存项 ${index + 1}"),
+                    "value" to item.optString("lastValue", "0"),
+                    "freeze" to item.optBoolean("freeze", false),
+                    "freezeType" to item.optInt("freezeType", MemoryFreezer.FREEZE_NORMAL),
+                    "freezeFrom" to item.optString("freezeFrom", ""),
+                    "freezeTo" to item.optString("freezeTo", ""),
+                )
+            }.filterTo(mutableListOf()) { (it["address"] as? Number)?.toLong()?.let { address -> address > 0L } == true }
+        } catch (_: Exception) {
+            mutableListOf()
+        }
+    }
+
+    private fun persistSavedList(items: List<Map<String, Any?>>) {
+        val prefs = context?.getSharedPreferences("gg_overlay", Context.MODE_PRIVATE) ?: return
+        val array = JSONArray()
+        for (item in items) {
+            array.put(JSONObject().apply {
+                put("address", ((item["address"] as? Number)?.toLong() ?: 0L).toString())
+                put("type", item["type"]?.toString() ?: "dword")
+                put("packageName", item["packageName"]?.toString() ?: targetPackageKey())
+                put("label", item["name"]?.toString() ?: "保存项")
+                put("lastValue", item["value"]?.toString() ?: "0")
+                put("freeze", item["freeze"] as? Boolean ?: false)
+                put("freezeType", (item["freezeType"] as? Number)?.toInt() ?: MemoryFreezer.FREEZE_NORMAL)
+                put("freezeFrom", item["freezeFrom"]?.toString() ?: "")
+                put("freezeTo", item["freezeTo"]?.toString() ?: "")
+            })
+        }
+        prefs.edit().putString("saved_memory_items", array.toString()).apply()
+        savedList.clear()
+        savedList.addAll(items.map { it.toMutableMap() })
     }
 
     private fun registerGgApi(gg: LuaTable) {
@@ -491,6 +545,8 @@ object LuaEngine {
             override fun call(arg: LuaValue): LuaValue {
                 if (!arg.istable()) return LuaValue.valueOf("items must be a table")
                 val table = arg.checktable()
+                savedList.clear()
+                savedList.addAll(loadPersistentSavedList())
                 var count = 0
                 for (i in 1..table.length()) {
                     val source = table.get(i)
@@ -514,7 +570,8 @@ object LuaEngine {
                         "address" to address,
                         "value" to value,
                         "type" to type,
-                        "name" to name,
+                        "packageName" to targetPackageKey(),
+                        "name" to name.ifBlank { "地址 0x${address.toString(16).uppercase()}" },
                         "freeze" to freeze,
                         "freezeType" to freezeType,
                         "freezeFrom" to freezeFrom,
@@ -529,6 +586,7 @@ object LuaEngine {
                         count++
                     }
                 }
+                persistSavedList(savedList)
                 outputLog.appendLine("💾 已加入保存列表 $count 条")
                 return if (count > 0 || table.length() == 0) LuaValue.TRUE else LuaValue.valueOf("no items were added")
             }
@@ -564,7 +622,11 @@ object LuaEngine {
         gg.set("getListItems", object : org.luaj.vm2.lib.ZeroArgFunction() {
             override fun call(): LuaValue {
                 val output = LuaTable()
-                for ((index, source) in savedList.withIndex()) {
+                savedList.clear()
+                savedList.addAll(loadPersistentSavedList())
+                val targetKey = targetPackageKey()
+                val visible = savedList.filter { it["packageName"] == targetKey }
+                for ((index, source) in visible.withIndex()) {
                     val address = (source["address"] as? Number)?.toLong() ?: continue
                     val type = source["type"] as? String ?: "dword"
                     val currentValue = MemoryEngine.readMemory(address, type) ?: source["value"]
@@ -589,6 +651,8 @@ object LuaEngine {
             override fun call(arg: LuaValue): LuaValue {
                 if (!arg.istable()) return LuaValue.valueOf("items must be a table")
                 val table = arg.checktable()
+                savedList.clear()
+                savedList.addAll(loadPersistentSavedList())
                 var count = 0
                 for (i in 1..table.length()) {
                     val source = table.get(i)
@@ -599,6 +663,7 @@ object LuaEngine {
                     MemoryFreezer.unfreeze(address)
                     if (savedList.size < before) count++
                 }
+                persistSavedList(savedList)
                 outputLog.appendLine("🗑️ 已从保存列表移除 $count 个地址")
                 return LuaValue.TRUE
             }
@@ -621,11 +686,64 @@ object LuaEngine {
                 return LuaValue.valueOf(success)
             }
         })
+        gg.set("processToggle", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                val pid = MemoryEngine.getAttachedPid() ?: return LuaValue.FALSE
+                val state = RootManager.executeRootCommand("grep '^State:' /proc/$pid/status | cut -c 8")
+                val paused = state?.trim()?.startsWith("T") == true
+                val success = RootManager.executeRootCommand("kill -${if (paused) "CONT" else "STOP"} $pid") != null
+                if (success) outputLog.appendLine(if (paused) "▶️ 已恢复进程 $pid" else "⏸️ 已暂停进程 $pid")
+                return LuaValue.valueOf(success)
+            }
+        })
+        gg.set("processKill", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                val pid = MemoryEngine.getAttachedPid() ?: return LuaValue.FALSE
+                val success = RootManager.executeRootCommand("kill -KILL $pid") != null
+                if (success) {
+                    outputLog.appendLine("⏹️ 已结束进程 $pid")
+                    MemoryEngine.detachProcess()
+                    context?.getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)?.edit()
+                        ?.remove("attached_pid")
+                        ?.remove("attached_package")
+                        ?.remove("attached_name")
+                        ?.remove("attached_time")
+                        ?.apply()
+                }
+                return LuaValue.valueOf(success)
+            }
+        })
         gg.set("isProcessPaused", object : org.luaj.vm2.lib.ZeroArgFunction() {
             override fun call(): LuaValue {
                 val pid = MemoryEngine.getAttachedPid() ?: return LuaValue.FALSE
                 val state = RootManager.executeRootCommand("grep '^State:' /proc/$pid/status | cut -c 8")
                 return LuaValue.valueOf(state?.trim()?.startsWith("T") == true)
+            }
+        })
+
+        // gg.copyMemory / gg.dumpMemory
+        gg.set("copyMemory", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                val from = parseLuaAddress(args.arg(1)) ?: return LuaValue.valueOf("invalid source address")
+                val to = parseLuaAddress(args.arg(2)) ?: return LuaValue.valueOf("invalid target address")
+                val bytes = args.arg(3).toint()
+                val success = MemoryEngine.copyMemory(from, to, bytes)
+                if (success) outputLog.appendLine("📋 已复制 $bytes 字节：0x${from.toString(16).uppercase()} → 0x${to.toString(16).uppercase()}")
+                return if (success) LuaValue.TRUE else LuaValue.valueOf("copy memory failed")
+            }
+        })
+        gg.set("dumpMemory", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                val from = parseLuaAddress(args.arg(1)) ?: return LuaValue.valueOf("invalid start address")
+                val to = parseLuaAddress(args.arg(2)) ?: return LuaValue.valueOf("invalid end address")
+                val directoryPath = args.arg(3).tojstring().trim()
+                if (directoryPath.isEmpty()) return LuaValue.valueOf("dump directory is empty")
+                val directory = java.io.File(directoryPath)
+                val outputFile = java.io.File(directory, "dump_${from.toString(16)}_${to.toString(16)}.bin")
+                val written = MemoryEngine.dumpMemory(from, to, outputFile)
+                if (written < 0L) return LuaValue.valueOf("dump memory failed")
+                outputLog.appendLine("💾 已转储 $written 字节：${outputFile.absolutePath}")
+                return LuaValue.TRUE
             }
         })
 
@@ -701,6 +819,7 @@ object LuaEngine {
         gg.set("clearList", object : org.luaj.vm2.lib.ZeroArgFunction() {
             override fun call(): LuaValue {
                 savedList.clear()
+                persistSavedList(emptyList())
                 MemoryFreezer.clearAll()
                 outputLog.appendLine("🔓 已清空保存与冻结列表")
                 return LuaValue.NIL
@@ -726,6 +845,7 @@ object LuaEngine {
         gg.set("FREEZE_MAY_INCREASE", LuaValue.valueOf(MemoryFreezer.FREEZE_MAY_INCREASE))
         gg.set("FREEZE_MAY_DECREASE", LuaValue.valueOf(MemoryFreezer.FREEZE_MAY_DECREASE))
         gg.set("FREEZE_IN_RANGE", LuaValue.valueOf(MemoryFreezer.FREEZE_IN_RANGE))
+        gg.set("DUMP_SKIP_SYSTEM_LIBS", LuaValue.valueOf(1))
         gg.set("REGION_ANONYMOUS", LuaValue.valueOf(1))
         gg.set("REGION_C_HEAP", LuaValue.valueOf(2))
         gg.set("REGION_JAVA_HEAP", LuaValue.valueOf(4))

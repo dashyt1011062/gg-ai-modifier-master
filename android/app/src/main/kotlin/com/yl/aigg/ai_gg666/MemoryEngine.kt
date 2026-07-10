@@ -571,6 +571,62 @@ object MemoryEngine {
     // 兼容旧调用
     fun writeMemory(address: Int, value: Any, type: String): Boolean = writeMemory(address.toLong(), value, type)
 
+    fun readBytes(address: Long, size: Int): ByteArray? {
+        val pid = attachedPid ?: return null
+        if (address <= 0L || size <= 0 || size > 16 * 1024 * 1024 || !isAttachedProcessAlive()) return null
+        return try {
+            runBlocking { RootScanner.readMemory(pid, address, size) }
+        } catch (e: Exception) {
+            Log.e(TAG, "readBytes failed: ${e.message}")
+            null
+        }
+    }
+
+    fun writeBytes(address: Long, data: ByteArray): Boolean {
+        val pid = attachedPid ?: return false
+        if (address <= 0L || data.isEmpty() || data.size > 16 * 1024 * 1024 || !isAttachedProcessAlive()) return false
+        return try {
+            runBlocking { RootScanner.writeMemory(pid, address, data) }
+        } catch (e: Exception) {
+            Log.e(TAG, "writeBytes failed: ${e.message}")
+            false
+        }
+    }
+
+    fun copyMemory(from: Long, to: Long, bytes: Int): Boolean {
+        if (from <= 0L || to <= 0L || bytes <= 0 || bytes > 16 * 1024 * 1024) return false
+        val data = readBytes(from, bytes) ?: return false
+        if (data.size != bytes) return false
+        return writeBytes(to, data)
+    }
+
+    fun dumpMemory(from: Long, to: Long, outputFile: File): Long {
+        val pid = attachedPid ?: return -1L
+        if (from < 0L || to <= from || !isAttachedProcessAlive()) return -1L
+        val total = to - from
+        if (total > 256L * 1024L * 1024L) return -1L
+        return try {
+            outputFile.parentFile?.mkdirs()
+            var cursor = from
+            var written = 0L
+            outputFile.outputStream().buffered().use { output ->
+                while (cursor < to) {
+                    val size = minOf(256 * 1024L, to - cursor).toInt()
+                    val data = runBlocking { RootScanner.readMemory(pid, cursor, size) } ?: return -1L
+                    if (data.isEmpty()) return -1L
+                    output.write(data)
+                    cursor += data.size
+                    written += data.size
+                    if (data.size < size) break
+                }
+            }
+            written
+        } catch (e: Exception) {
+            Log.e(TAG, "dumpMemory failed: ${e.message}")
+            -1L
+        }
+    }
+
     fun writeBatch(requests: List<Map<String, Any>>): Boolean {
         var ok = true
         for (req in requests) {
