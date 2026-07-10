@@ -297,6 +297,106 @@ object LuaEngine {
         savedList.addAll(items.map { it.toMutableMap() })
     }
 
+    private fun savedListFileItems(file: java.io.File): List<MutableMap<String, Any?>> {
+        if (!file.isFile || file.length() <= 0L || file.length() > 16L * 1024L * 1024L) return emptyList()
+        return try {
+            val text = file.readText()
+            if (text.trimStart().startsWith("{") || text.trimStart().startsWith("[")) {
+                val trimmed = text.trim()
+                val array = if (trimmed.startsWith("[")) JSONArray(trimmed) else JSONObject(trimmed).optJSONArray("items") ?: JSONArray()
+                MutableList(array.length()) { index ->
+                    val item = array.getJSONObject(index)
+                    val rawAddress = item.optString("address", "0").removePrefix("0x").removePrefix("0X")
+                    val address = rawAddress.toLongOrNull() ?: rawAddress.toLongOrNull(16) ?: item.optLong("address", 0L)
+                    mutableMapOf<String, Any?>(
+                        "address" to address,
+                        "type" to item.optString("type", "dword").lowercase(),
+                        "packageName" to item.optString("packageName", ""),
+                        "name" to item.optString("label", item.optString("name", "导入项 ${index + 1}")),
+                        "value" to item.optString("lastValue", item.optString("value", "0")),
+                        "freeze" to item.optBoolean("freeze", false),
+                        "freezeType" to item.optInt("freezeType", MemoryFreezer.FREEZE_NORMAL),
+                        "freezeFrom" to item.optString("freezeFrom", ""),
+                        "freezeTo" to item.optString("freezeTo", ""),
+                    )
+                }.filter { (it["address"] as? Number)?.toLong()?.let { address -> address > 0L } == true && MemoryEngine.isSupportedType(it["type"]?.toString() ?: "") }
+            } else {
+                text.lineSequence().mapNotNull { line ->
+                    val trimmed = line.trim()
+                    if (trimmed.isEmpty() || trimmed.startsWith("#")) return@mapNotNull null
+                    val parts = line.split('\t')
+                    if (parts.size < 3) return@mapNotNull null
+                    val rawAddress = parts[0].trim().removePrefix("0x").removePrefix("0X")
+                    val address = rawAddress.toLongOrNull(16) ?: rawAddress.toLongOrNull() ?: return@mapNotNull null
+                    val type = parts[1].trim().lowercase()
+                    if (!MemoryEngine.isSupportedType(type)) return@mapNotNull null
+                    mutableMapOf<String, Any?>(
+                        "address" to address,
+                        "type" to type,
+                        "packageName" to parts.getOrNull(8)?.trim().orEmpty(),
+                        "name" to (parts.getOrNull(7)?.trim()?.takeIf { it.isNotEmpty() } ?: "地址 0x${address.toString(16).uppercase()}"),
+                        "value" to parts.getOrNull(2)?.trim().orEmpty().ifBlank { "0" },
+                        "freeze" to (parts.getOrNull(3)?.trim()?.equals("true", ignoreCase = true) == true),
+                        "freezeType" to (parts.getOrNull(4)?.trim()?.toIntOrNull() ?: MemoryFreezer.FREEZE_NORMAL),
+                        "freezeFrom" to parts.getOrNull(5)?.trim().orEmpty(),
+                        "freezeTo" to parts.getOrNull(6)?.trim().orEmpty(),
+                    )
+                }.toList()
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun writeSavedListFile(file: java.io.File, items: List<Map<String, Any?>>, asText: Boolean): Boolean {
+        return try {
+            file.parentFile?.mkdirs()
+            if (asText) {
+                file.bufferedWriter().use { writer ->
+                    writer.appendLine("# GG-AI SAVED LIST v1")
+                    writer.appendLine("# address\ttype\tvalue\tfreeze\tfreezeType\tfreezeFrom\tfreezeTo\tlabel\tpackageName")
+                    for (item in items) {
+                        fun clean(value: Any?): String = value?.toString()?.replace('\t', ' ')?.replace('\r', ' ')?.replace('\n', ' ') ?: ""
+                        val address = (item["address"] as? Number)?.toLong() ?: continue
+                        writer.append("0x${address.toString(16).uppercase()}").append('\t')
+                            .append(clean(item["type"] ?: "dword")).append('\t')
+                            .append(clean(item["value"] ?: "0")).append('\t')
+                            .append(clean(item["freeze"] ?: false)).append('\t')
+                            .append(clean(item["freezeType"] ?: MemoryFreezer.FREEZE_NORMAL)).append('\t')
+                            .append(clean(item["freezeFrom"])).append('\t')
+                            .append(clean(item["freezeTo"])).append('\t')
+                            .append(clean(item["name"])).append('\t')
+                            .appendLine(clean(item["packageName"]))
+                    }
+                }
+            } else {
+                val array = JSONArray()
+                for (item in items) {
+                    array.put(JSONObject().apply {
+                        put("address", ((item["address"] as? Number)?.toLong() ?: 0L).toString())
+                        put("type", item["type"]?.toString() ?: "dword")
+                        put("packageName", item["packageName"]?.toString() ?: targetPackageKey())
+                        put("label", item["name"]?.toString() ?: "保存项")
+                        put("lastValue", item["value"]?.toString() ?: "0")
+                        put("freeze", item["freeze"] as? Boolean ?: false)
+                        put("freezeType", (item["freezeType"] as? Number)?.toInt() ?: MemoryFreezer.FREEZE_NORMAL)
+                        put("freezeFrom", item["freezeFrom"]?.toString() ?: "")
+                        put("freezeTo", item["freezeTo"]?.toString() ?: "")
+                    })
+                }
+                file.writeText(JSONObject().apply {
+                    put("format", "GG-AI-SAVED-LIST")
+                    put("version", 1)
+                    put("createdAt", System.currentTimeMillis())
+                    put("items", array)
+                }.toString(2))
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun registerGgApi(gg: LuaTable) {
         // gg.toast
         gg.set("toast", object : OneArgFunction() {
@@ -669,6 +769,69 @@ object LuaEngine {
             }
         })
 
+        // gg.saveList / gg.loadList
+        gg.set("saveList", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                val path = args.arg(1).tojstring().trim()
+                if (path.isEmpty()) return LuaValue.valueOf("file path is empty")
+                val flags = if (args.narg() >= 2 && !args.arg(2).isnil()) args.arg(2).toint() else 0
+                savedList.clear()
+                savedList.addAll(loadPersistentSavedList())
+                val targetKey = targetPackageKey()
+                val items = savedList.filter { it["packageName"] == targetKey }
+                val success = writeSavedListFile(java.io.File(path), items, flags and 1 != 0)
+                if (success) outputLog.appendLine("💾 已保存 ${items.size} 条列表：$path")
+                return if (success) LuaValue.TRUE else LuaValue.valueOf("save list failed")
+            }
+        })
+        gg.set("loadList", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                val path = args.arg(1).tojstring().trim()
+                if (path.isEmpty()) return LuaValue.valueOf("file path is empty")
+                val flags = if (args.narg() >= 2 && !args.arg(2).isnil()) args.arg(2).toint() else 0
+                val imported = savedListFileItems(java.io.File(path))
+                if (imported.isEmpty()) return LuaValue.valueOf("list file is empty or invalid")
+                val append = flags and 1 != 0
+                val applyValues = flags and 2 != 0 || flags and 4 != 0
+                val freezeValues = flags and 4 != 0
+                val targetKey = targetPackageKey()
+                savedList.clear()
+                savedList.addAll(loadPersistentSavedList())
+                if (!append) savedList.removeAll { it["packageName"] == targetKey }
+                var loaded = 0
+                for (source in imported) {
+                    val address = (source["address"] as? Number)?.toLong() ?: continue
+                    val type = source["type"]?.toString()?.takeIf { MemoryEngine.isSupportedType(it) } ?: continue
+                    val value = source["value"]?.toString()?.let { raw ->
+                        parseLuaMemoryValue(LuaValue.valueOf(raw), type)
+                    } ?: MemoryEngine.readMemory(address, type)
+                    val item = source.toMutableMap().apply {
+                        this["packageName"] = targetKey
+                        this["type"] = type
+                        this["freeze"] = if (freezeValues) true else (this["freeze"] as? Boolean ?: false)
+                    }
+                    val index = savedList.indexOfFirst {
+                        (it["address"] as? Number)?.toLong() == address && it["type"] == type && it["packageName"] == targetKey
+                    }
+                    if (index >= 0) savedList[index] = item else savedList.add(item)
+                    var success = true
+                    if (applyValues && value != null) success = MemoryEngine.writeMemory(address, value, type)
+                    if (success && (freezeValues || item["freeze"] == true) && value != null) {
+                        val freezeType = (item["freezeType"] as? Number)?.toInt() ?: MemoryFreezer.FREEZE_NORMAL
+                        val freezeFrom = item["freezeFrom"]?.toString()?.takeIf { it.isNotBlank() }
+                            ?.let { parseLuaMemoryValue(LuaValue.valueOf(it), type) }
+                        val freezeTo = item["freezeTo"]?.toString()?.takeIf { it.isNotBlank() }
+                            ?.let { parseLuaMemoryValue(LuaValue.valueOf(it), type) }
+                        success = MemoryFreezer.freeze(address, value, type, freezeType, freezeFrom, freezeTo)
+                    }
+                    if (success) loaded++
+                }
+                persistSavedList(savedList)
+                outputLog.appendLine("📥 已加载 $loaded/${imported.size} 条列表：$path")
+                return LuaValue.TRUE
+            }
+        })
+
         // gg.processPause / gg.processResume / gg.isProcessPaused
         gg.set("processPause", object : org.luaj.vm2.lib.ZeroArgFunction() {
             override fun call(): LuaValue {
@@ -846,6 +1009,10 @@ object LuaEngine {
         gg.set("FREEZE_MAY_DECREASE", LuaValue.valueOf(MemoryFreezer.FREEZE_MAY_DECREASE))
         gg.set("FREEZE_IN_RANGE", LuaValue.valueOf(MemoryFreezer.FREEZE_IN_RANGE))
         gg.set("DUMP_SKIP_SYSTEM_LIBS", LuaValue.valueOf(1))
+        gg.set("SAVE_AS_TEXT", LuaValue.valueOf(1))
+        gg.set("LOAD_APPEND", LuaValue.valueOf(1))
+        gg.set("LOAD_VALUES", LuaValue.valueOf(2))
+        gg.set("LOAD_VALUES_FREEZE", LuaValue.valueOf(4))
         gg.set("REGION_ANONYMOUS", LuaValue.valueOf(1))
         gg.set("REGION_C_HEAP", LuaValue.valueOf(2))
         gg.set("REGION_JAVA_HEAP", LuaValue.valueOf(4))

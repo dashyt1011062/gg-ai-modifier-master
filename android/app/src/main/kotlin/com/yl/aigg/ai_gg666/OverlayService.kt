@@ -2231,6 +2231,142 @@ class OverlayService : Service() {
             .apply()
     }
 
+    private fun savedListDirectory(): java.io.File {
+        return (getExternalFilesDir("saved_lists") ?: java.io.File(filesDir, "saved_lists")).apply { mkdirs() }
+    }
+
+    private fun savedItemsToJson(items: List<SavedMemoryItem>): JSONArray {
+        return JSONArray().apply {
+            for (item in items) {
+                put(JSONObject().apply {
+                    put("address", item.address.toString())
+                    put("type", item.type)
+                    put("packageName", item.packageName)
+                    put("label", item.label)
+                    put("lastValue", item.lastValue)
+                    put("freeze", item.freeze)
+                    put("freezeType", item.freezeType)
+                    put("freezeFrom", item.freezeFrom)
+                    put("freezeTo", item.freezeTo)
+                })
+            }
+        }
+    }
+
+    private fun exportSavedMemoryItems(items: List<SavedMemoryItem>, rawName: String, asText: Boolean): java.io.File? {
+        if (items.isEmpty()) return null
+        val safeBase = rawName.trim()
+            .replace(Regex("[^A-Za-z0-9._-]"), "_")
+            .trim('_', '.')
+            .ifBlank { "saved_list_${System.currentTimeMillis()}" }
+        val extension = if (asText) ".txt" else ".json"
+        val fileName = if (safeBase.endsWith(extension, ignoreCase = true)) safeBase else safeBase.substringBeforeLast('.', safeBase) + extension
+        val output = java.io.File(savedListDirectory(), fileName)
+        return try {
+            if (asText) {
+                output.bufferedWriter().use { writer ->
+                    writer.appendLine("# GG-AI SAVED LIST v1")
+                    writer.appendLine("# address\ttype\tvalue\tfreeze\tfreezeType\tfreezeFrom\tfreezeTo\tlabel\tpackageName")
+                    for (item in items) {
+                        fun clean(value: String): String = value.replace('\t', ' ').replace('\r', ' ').replace('\n', ' ')
+                        writer.append("0x${item.address.toString(16).uppercase()}").append('\t')
+                            .append(item.type).append('\t')
+                            .append(clean(item.lastValue)).append('\t')
+                            .append(item.freeze.toString()).append('\t')
+                            .append(item.freezeType.toString()).append('\t')
+                            .append(clean(item.freezeFrom)).append('\t')
+                            .append(clean(item.freezeTo)).append('\t')
+                            .append(clean(item.label)).append('\t')
+                            .appendLine(clean(item.packageName))
+                    }
+                }
+            } else {
+                val root = JSONObject().apply {
+                    put("format", "GG-AI-SAVED-LIST")
+                    put("version", 1)
+                    put("createdAt", System.currentTimeMillis())
+                    put("items", savedItemsToJson(items))
+                }
+                output.writeText(root.toString(2))
+            }
+            output
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun parseSavedMemoryItems(file: java.io.File): List<SavedMemoryItem> {
+        if (!file.isFile || file.length() <= 0L || file.length() > 16L * 1024L * 1024L) return emptyList()
+        return try {
+            val text = file.readText()
+            if (text.trimStart().startsWith("{") || text.trimStart().startsWith("[")) {
+                val trimmed = text.trim()
+                val array = if (trimmed.startsWith("[")) JSONArray(trimmed) else JSONObject(trimmed).optJSONArray("items") ?: JSONArray()
+                MutableList(array.length()) { index ->
+                    val item = array.getJSONObject(index)
+                    SavedMemoryItem(
+                        address = item.optString("address").removePrefix("0x").removePrefix("0X").let { raw ->
+                            raw.toLongOrNull() ?: raw.toLongOrNull(16) ?: item.optLong("address", 0L)
+                        },
+                        type = item.optString("type", "dword").lowercase(),
+                        packageName = item.optString("packageName", ""),
+                        label = item.optString("label", "导入项 ${index + 1}"),
+                        lastValue = item.optString("lastValue", item.optString("value", "0")),
+                        freeze = item.optBoolean("freeze", false),
+                        freezeType = item.optInt("freezeType", MemoryFreezer.FREEZE_NORMAL)
+                            .coerceIn(MemoryFreezer.FREEZE_NORMAL, MemoryFreezer.FREEZE_IN_RANGE),
+                        freezeFrom = item.optString("freezeFrom", ""),
+                        freezeTo = item.optString("freezeTo", ""),
+                    )
+                }.filter { it.address > 0L && MemoryEngine.isSupportedType(it.type) }
+            } else {
+                text.lineSequence().mapNotNull { line ->
+                    val trimmed = line.trim()
+                    if (trimmed.isEmpty() || trimmed.startsWith("#")) return@mapNotNull null
+                    val parts = line.split('\t')
+                    if (parts.size < 3) return@mapNotNull null
+                    val addressRaw = parts[0].trim().removePrefix("0x").removePrefix("0X")
+                    val address = addressRaw.toLongOrNull(16) ?: addressRaw.toLongOrNull() ?: return@mapNotNull null
+                    val type = parts[1].trim().lowercase()
+                    if (!MemoryEngine.isSupportedType(type)) return@mapNotNull null
+                    SavedMemoryItem(
+                        address = address,
+                        type = type,
+                        packageName = parts.getOrNull(8)?.trim().orEmpty(),
+                        label = parts.getOrNull(7)?.trim().takeUnless { it.isNullOrEmpty() } ?: "地址 0x${address.toString(16).uppercase()}",
+                        lastValue = parts.getOrNull(2)?.trim().orEmpty().ifBlank { "0" },
+                        freeze = parts.getOrNull(3)?.trim()?.toBooleanStrictOrNull() ?: false,
+                        freezeType = parts.getOrNull(4)?.trim()?.toIntOrNull()
+                            ?.coerceIn(MemoryFreezer.FREEZE_NORMAL, MemoryFreezer.FREEZE_IN_RANGE)
+                            ?: MemoryFreezer.FREEZE_NORMAL,
+                        freezeFrom = parts.getOrNull(5)?.trim().orEmpty(),
+                        freezeTo = parts.getOrNull(6)?.trim().orEmpty(),
+                    )
+                }.toList()
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun mergeImportedSavedItems(imported: List<SavedMemoryItem>, append: Boolean): Int {
+        if (imported.isEmpty()) return 0
+        val currentPackage = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
+            .getString("attached_package", "")
+            ?.takeIf { it.isNotBlank() }
+            ?: "pid:${MemoryEngine.getAttachedPid() ?: 0}"
+        val base = if (append) loadSavedMemoryItems() else mutableListOf()
+        var changed = 0
+        for (source in imported) {
+            val item = source.copy(packageName = source.packageName.ifBlank { currentPackage })
+            val index = base.indexOfFirst { savedItemKey(it) == savedItemKey(item) }
+            if (index >= 0) base[index] = item else base.add(item)
+            changed++
+        }
+        persistSavedMemoryItems(base)
+        return changed
+    }
+
     private fun addResultsToSavedList(results: List<Map<String, Any>>): Int {
         if (results.isEmpty()) return 0
         val prefs = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
@@ -2423,6 +2559,181 @@ class OverlayService : Service() {
             }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(4) })
             content.addView(actions)
         }, 380, 440, onBack = { showSavedListPanel() }, titleIcon = R.drawable.ic_agg_lock)
+    }
+
+    private fun showSavedListExportPanel(items: List<SavedMemoryItem>) {
+        makeDraggablePanel("导出保存列表", { content ->
+            content.addView(TextView(this).apply {
+                text = "将导出 ${items.size} 条保存项，包含名称、数值、类型和冻结设置"
+                setTextColor(Color.parseColor("#CAC4D0"))
+                textSize = 10f
+                setPadding(dp(5), dp(3), dp(5), dp(7))
+            })
+            val nameInput = EditText(this).apply {
+                setText("saved_list_${System.currentTimeMillis()}")
+                setSingleLine(true)
+                textSize = 11f
+                setTextColor(Color.parseColor("#F3EDF7"))
+                setHintTextColor(Color.parseColor("#938F99"))
+                hint = "文件名"
+                setPadding(dp(11), 0, dp(11), 0)
+                background = aggMenuDrawable(Color.parseColor("#25222B"), 9, Color.parseColor("#49454F"))
+            }
+            content.addView(nameInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)))
+
+            val formats = arrayOf("JSON 完整备份", "TXT 可读文本")
+            val spinner = Spinner(this).apply {
+                adapter = ArrayAdapter(this@OverlayService, android.R.layout.simple_spinner_item, formats).apply {
+                    setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+                }
+                background = aggMenuDrawable(Color.parseColor("#34313A"), 9, Color.parseColor("#49454F"))
+            }
+            content.addView(spinner, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)).apply { topMargin = dp(7) })
+
+            val state = TextView(this).apply {
+                text = "保存目录：${savedListDirectory().absolutePath}"
+                setTextColor(Color.parseColor("#938F99"))
+                textSize = 8.8f
+                maxLines = 3
+                setPadding(dp(5), dp(7), dp(5), dp(3))
+            }
+            content.addView(state)
+
+            fun button(label: String, accent: Boolean = false, action: () -> Unit): TextView {
+                return TextView(this).apply {
+                    text = label
+                    gravity = Gravity.CENTER
+                    textSize = 10f
+                    setTextColor(if (accent) Color.parseColor("#231A2E") else Color.parseColor("#E6E0E9"))
+                    setTypeface(null, if (accent) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                    background = aggMenuDrawable(
+                        if (accent) Color.parseColor("#D0BCFF") else Color.parseColor("#302D35"),
+                        9,
+                        if (accent) Color.parseColor("#E8DEF8") else Color.parseColor("#49454F"),
+                    )
+                    setOnClickListener { action() }
+                }
+            }
+            val actions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(8), 0, 0)
+            }
+            actions.addView(button("取消") { showSavedListPanel() }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(4) })
+            actions.addView(button("导出", true) {
+                val file = exportSavedMemoryItems(items, nameInput.text.toString(), spinner.selectedItemPosition == 1)
+                if (file == null) {
+                    state.text = "导出失败，请检查保存项和文件名"
+                    state.setTextColor(Color.parseColor("#FFB4AB"))
+                } else {
+                    state.text = "已导出 ${items.size} 条\n${file.absolutePath}"
+                    state.setTextColor(Color.parseColor("#C8F7DC"))
+                    copyToClipboard(file.absolutePath)
+                    Toast.makeText(this@OverlayService, "导出成功，路径已复制", Toast.LENGTH_SHORT).show()
+                }
+            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(4) })
+            content.addView(actions)
+        }, 370, 310, onBack = { showSavedListPanel() }, titleIcon = R.drawable.ic_agg_copy)
+    }
+
+    private fun showSavedListImportPanel() {
+        makeDraggablePanel("导入保存列表", { content ->
+            val status = TextView(this).apply {
+                setTextColor(Color.parseColor("#CAC4D0"))
+                textSize = 9.5f
+                setPadding(dp(5), dp(2), dp(5), dp(6))
+            }
+            content.addView(status)
+            val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val scroll = ScrollView(this).apply {
+                isFillViewport = true
+                addView(list)
+            }
+            content.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+            fun importButton(label: String, danger: Boolean = false, action: () -> Unit): TextView {
+                return TextView(this).apply {
+                    text = label
+                    gravity = Gravity.CENTER
+                    textSize = 9f
+                    setTextColor(if (danger) Color.parseColor("#FFB4AB") else Color.parseColor("#E6E0E9"))
+                    background = aggMenuDrawable(
+                        if (danger) Color.parseColor("#35232A") else Color.parseColor("#302D35"),
+                        7,
+                        if (danger) Color.parseColor("#68404A") else Color.parseColor("#49454F"),
+                    )
+                    setOnClickListener { action() }
+                }
+            }
+
+            fun renderFiles() {
+                list.removeAllViews()
+                val files = savedListDirectory().listFiles()
+                    ?.filter { it.isFile && (it.extension.equals("json", true) || it.extension.equals("txt", true)) }
+                    ?.sortedByDescending { it.lastModified() }
+                    .orEmpty()
+                status.text = "找到 ${files.size} 个列表文件 · 追加会合并同地址，替换会清空当前列表"
+                if (files.isEmpty()) {
+                    list.addView(TextView(this).apply {
+                        text = "没有可导入文件\n请先使用“导出”生成列表文件"
+                        gravity = Gravity.CENTER
+                        setTextColor(Color.parseColor("#938F99"))
+                        textSize = 10.5f
+                        setPadding(dp(8), dp(42), dp(8), dp(42))
+                    })
+                    return
+                }
+                for (file in files) {
+                    val parsed = parseSavedMemoryItems(file)
+                    val row = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(8), dp(7), dp(8), dp(7))
+                        background = aggMenuDrawable(Color.parseColor("#25222B"), 9, Color.parseColor("#3A3641"))
+                        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                    }
+                    row.addView(TextView(this).apply {
+                        text = file.name
+                        setTextColor(Color.parseColor("#F3EDF7"))
+                        textSize = 11f
+                        setTypeface(null, android.graphics.Typeface.BOLD)
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                    })
+                    row.addView(TextView(this).apply {
+                        text = "${parsed.size} 条 · ${file.length()} 字节 · ${file.extension.uppercase()}"
+                        setTextColor(if (parsed.isEmpty()) Color.parseColor("#FFB4AB") else Color.parseColor("#938F99"))
+                        textSize = 8.8f
+                        setPadding(0, dp(2), 0, dp(5))
+                    })
+                    val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                    buttons.addView(importButton("追加") {
+                        val count = mergeImportedSavedItems(parsed, append = true)
+                        Toast.makeText(this@OverlayService, "已追加 $count 条", Toast.LENGTH_SHORT).show()
+                        showSavedListPanel()
+                    }, LinearLayout.LayoutParams(0, dp(34), 1f).apply { marginEnd = dp(2) })
+                    buttons.addView(importButton("替换") {
+                        val count = mergeImportedSavedItems(parsed, append = false)
+                        MemoryFreezer.clearAll()
+                        Toast.makeText(this@OverlayService, "已替换为 $count 条", Toast.LENGTH_SHORT).show()
+                        showSavedListPanel()
+                    }, LinearLayout.LayoutParams(0, dp(34), 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
+                    buttons.addView(importButton("删除文件", danger = true) {
+                        if (file.delete()) renderFiles()
+                        else Toast.makeText(this@OverlayService, "删除失败", Toast.LENGTH_SHORT).show()
+                    }, LinearLayout.LayoutParams(0, dp(34), 1f).apply { marginStart = dp(2) })
+                    row.addView(buttons)
+                    list.addView(row)
+                }
+            }
+
+            val footer = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(7), 0, 0)
+            }
+            footer.addView(importButton("刷新文件") { renderFiles() }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginEnd = dp(3) })
+            footer.addView(importButton("返回列表") { showSavedListPanel() }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(3) })
+            content.addView(footer)
+            renderFiles()
+        }, 390, 520, onBack = { showSavedListPanel() }, titleIcon = R.drawable.ic_agg_lock)
     }
 
     private fun showSavedListPanel() {
@@ -2679,6 +2990,35 @@ class OverlayService : Service() {
             }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
             actions.addView(savedButton("返回搜索", true) { showSearchPanel() }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(3) })
             content.addView(actions)
+
+            var clearArmed = false
+            val fileActions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(5), 0, 0)
+            }
+            fileActions.addView(savedButton("导出") {
+                val items = visibleItems()
+                if (items.isEmpty()) Toast.makeText(this@OverlayService, "没有可导出的保存项", Toast.LENGTH_SHORT).show()
+                else showSavedListExportPanel(items)
+            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginEnd = dp(3) })
+            fileActions.addView(savedButton("导入") { showSavedListImportPanel() }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
+            val clearButton = savedButton("清空当前") {
+                if (!clearArmed) {
+                    clearArmed = true
+                    Toast.makeText(this@OverlayService, "再次点击确认清空当前进程保存项", Toast.LENGTH_SHORT).show()
+                    handler.postDelayed({ clearArmed = false }, 3000L)
+                    return@savedButton
+                }
+                val keys = visibleItems().map { savedItemKey(it) }.toSet()
+                for (item in visibleItems()) MemoryFreezer.unfreeze(item.address)
+                allItems.removeAll { savedItemKey(it) in keys }
+                persistSavedMemoryItems(allItems)
+                clearArmed = false
+                render()
+            }
+            clearButton.setTextColor(Color.parseColor("#FFB4AB"))
+            fileActions.addView(clearButton, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(3) })
+            content.addView(fileActions)
 
             render()
             refreshValues()
