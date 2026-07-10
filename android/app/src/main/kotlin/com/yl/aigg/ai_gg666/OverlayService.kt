@@ -1726,18 +1726,15 @@ class OverlayService : Service() {
         val displayName = if (pid != null) (processName ?: packageName ?: "已选择进程") else "未选择进程"
 
         val root = LinearLayout(this).apply {
-            orientation = if (isLandscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            // service_dialog.xml: full-screen horizontal frame with tabs_nav + main content.
+            orientation = LinearLayout.HORIZONTAL
             setPadding(dp(5), dp(5), dp(5), dp(5))
             setBackgroundResource(R.drawable.agg_window_background)
             elevation = dp(12).toFloat()
         }
         val mainColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            layoutParams = if (isLandscape) {
-                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
-            } else {
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
-            }
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
         }
 
         fun divider(horizontal: Boolean = true): View = View(this).apply {
@@ -1785,29 +1782,31 @@ class OverlayService : Service() {
             R.drawable.ic_dbg,
         )
         val tabNames = arrayOf("配置", "搜索", "保存", "内存", "断点")
-        val tabViews = mutableListOf<View>()
-        val tabCounters = mutableMapOf<Int, TextView>()
+        val tabViews = mutableListOf<Pair<Int, View>>()
+        val tabCounters = mutableMapOf<Int, MutableList<TextView>>()
         lateinit var renderTab: (Int) -> Unit
 
-        val appFrame = android.widget.FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(if (isLandscape) 54 else 48), dp(48))
-            setOnClickListener { showProcessPanel() }
-        }
-        appFrame.addView(ImageView(this).apply {
-            setImageResource(R.drawable.ic_gg_48dp)
-            scaleType = ImageView.ScaleType.CENTER_INSIDE
-        }, android.widget.FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER))
-        if (!packageName.isNullOrBlank()) {
-            val targetIcon = try { packageManager.getApplicationIcon(packageName) } catch (_: Exception) { null }
-            if (targetIcon != null) {
-                appFrame.addView(ImageView(this).apply {
-                    setImageDrawable(targetIcon)
-                    scaleType = ImageView.ScaleType.CENTER_CROP
-                    background = GradientDrawable().apply {
-                        shape = GradientDrawable.OVAL
-                        setColor(Color.WHITE)
+        fun makeAppFrame(includeTargetIcon: Boolean): android.widget.FrameLayout {
+            return android.widget.FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
+                setOnClickListener { showProcessPanel() }
+                addView(ImageView(this@OverlayService).apply {
+                    setImageResource(R.drawable.ic_gg_48dp)
+                    scaleType = ImageView.ScaleType.CENTER_INSIDE
+                }, android.widget.FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER))
+                if (includeTargetIcon && !packageName.isNullOrBlank()) {
+                    val targetIcon = try { packageManager.getApplicationIcon(packageName) } catch (_: Exception) { null }
+                    if (targetIcon != null) {
+                        addView(ImageView(this@OverlayService).apply {
+                            setImageDrawable(targetIcon)
+                            scaleType = ImageView.ScaleType.CENTER_CROP
+                            background = GradientDrawable().apply {
+                                shape = GradientDrawable.OVAL
+                                setColor(Color.WHITE)
+                            }
+                        }, android.widget.FrameLayout.LayoutParams(dp(20), dp(20), Gravity.TOP or Gravity.START))
                     }
-                }, android.widget.FrameLayout.LayoutParams(dp(20), dp(20), Gravity.TOP or Gravity.START))
+                }
             }
         }
 
@@ -1816,6 +1815,7 @@ class OverlayService : Service() {
                 background = tabBackground(index == aggMainTab)
                 setOnClickListener { renderTab(index) }
                 contentDescription = tabNames[index]
+                minimumHeight = dp(48)
             }
             frame.addView(ImageView(this).apply {
                 setImageResource(tabIcons[index])
@@ -1838,14 +1838,14 @@ class OverlayService : Service() {
                 else -> 0
             }
             val counter = smallCounter(count)
-            tabCounters[index] = counter
+            tabCounters.getOrPut(index) { mutableListOf() }.add(counter)
             frame.addView(counter, android.widget.FrameLayout.LayoutParams(
                 android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
                 android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP or Gravity.END,
             ))
             frame.layoutParams = LinearLayout.LayoutParams(dp(if (vertical) 56 else 48), dp(if (vertical) 56 else 48))
-            tabViews.add(frame)
+            tabViews.add(index to frame)
             return frame
         }
 
@@ -1858,34 +1858,31 @@ class OverlayService : Service() {
                 else -> showAggDebugAddPanel()
             }
         }
-        val closeButton = iconView(R.drawable.ic_close_white_24dp) { closePanel() }
+        val topCloseButton = iconView(R.drawable.ic_close_white_24dp) { closePanel() }
 
-        if (isLandscape) {
-            val rail = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER_HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(dp(58), LinearLayout.LayoutParams.MATCH_PARENT)
-            }
-            rail.addView(appFrame, LinearLayout.LayoutParams(dp(56), dp(48)))
-            for (i in tabNames.indices) rail.addView(createTab(i, true))
-            rail.addView(View(this), LinearLayout.LayoutParams(dp(1), 0, 1f))
-            rail.addView(closeButton, LinearLayout.LayoutParams(dp(48), dp(48)))
-            root.addView(rail)
-            root.addView(divider(horizontal = false))
-            root.addView(mainColumn)
-        } else {
-            val tabsRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
-            }
-            tabsRow.addView(appFrame)
-            for (i in tabNames.indices) tabsRow.addView(createTab(i, false))
-            tabsRow.addView(topMore)
-            tabsRow.addView(closeButton)
-            mainColumn.addView(tabsRow)
-            root.addView(mainColumn)
+        val rail = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(dp(58), LinearLayout.LayoutParams.WRAP_CONTENT)
         }
+        rail.addView(makeAppFrame(includeTargetIcon = false), LinearLayout.LayoutParams(dp(56), dp(48)))
+        for (i in tabNames.indices) rail.addView(createTab(i, true))
+        // cloudScript_nav exists in the original layout but is hidden by default; keep the rail compact.
+        root.addView(rail)
+        root.addView(divider(horizontal = false))
+        root.addView(mainColumn)
+
+        val tabsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
+        }
+        tabsRow.addView(makeAppFrame(includeTargetIcon = true), LinearLayout.LayoutParams(dp(48), dp(48)))
+        for (i in tabNames.indices) tabsRow.addView(createTab(i, false))
+        tabsRow.addView(View(this), LinearLayout.LayoutParams(0, dp(48), 1f))
+        tabsRow.addView(topMore, LinearLayout.LayoutParams(dp(48), dp(48)))
+        tabsRow.addView(topCloseButton, LinearLayout.LayoutParams(dp(48), dp(48)))
+        mainColumn.addView(tabsRow)
 
         val toolbarRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1908,7 +1905,7 @@ class OverlayService : Service() {
         toolbarRow.addView(toolbar)
         toolbarRow.addView(toolbarMore, LinearLayout.LayoutParams(dp(45), dp(48)))
         toolbarRow.addView(divider(horizontal = false), LinearLayout.LayoutParams(dp(1), dp(48)))
-        if (isLandscape) toolbarRow.addView(iconView(R.drawable.ic_close_white_24dp) { closePanel() })
+        // back_btn_nav exists in service_dialog.xml but is hidden by default; close stays in the top tab row.
         mainColumn.addView(toolbarRow)
         mainColumn.addView(divider())
 
@@ -1963,6 +1960,13 @@ class OverlayService : Service() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setPadding(dp(2), 0, dp(2), 0)
         }
+        val savedFormat = TextView(this).apply {
+            text = "h,D,F"
+            gravity = Gravity.CENTER_VERTICAL
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            visibility = View.GONE
+        }
         val infoMenu = iconView(R.drawable.ic_menu_white_24dp, 32, 7) {
             when (aggMainTab) {
                 0 -> showProcessControlPanel()
@@ -1978,6 +1982,7 @@ class OverlayService : Service() {
         infoRow.addView(infoFilter, LinearLayout.LayoutParams(0, dp(26), 1f))
         infoRow.addView(valueFormat, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(26)))
         infoRow.addView(foundCount, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(26)))
+        infoRow.addView(savedFormat, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(26)))
         infoRow.addView(infoMenu, LinearLayout.LayoutParams(dp(32), dp(26)))
         infoRow.addView(infoRefresh, LinearLayout.LayoutParams(dp(32), dp(26)))
         mainColumn.addView(infoRow)
@@ -1993,7 +1998,10 @@ class OverlayService : Service() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             text = "8.40.0  +  Ch,Jh,Ca,Cd,Cb,A,S,O"
             maxLines = 1
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { marginEnd = dp(60) }
         }
         mainColumn.addView(statusBar)
 
@@ -2902,19 +2910,22 @@ class OverlayService : Service() {
             if (prefs.getBoolean("agg_remember_tab", true)) {
                 prefs.edit().putInt("agg_last_tab", aggMainTab).apply()
             }
-            tabViews.forEachIndexed { index, view -> view.background = tabBackground(index == aggMainTab) }
+            tabViews.forEach { (index, view) -> view.background = tabBackground(index == aggMainTab) }
             val dynamicCounts = mapOf(
                 1 to searchResults.size,
                 2 to loadSavedMemoryItems().size,
                 4 to debugWatchItems.size,
             )
-            tabCounters.forEach { (index, counter) ->
+            tabCounters.forEach { (index, counters) ->
                 val count = dynamicCounts[index] ?: 0
-                counter.text = count.toString()
-                counter.visibility = if (count > 0) View.VISIBLE else View.GONE
+                counters.forEach { counter ->
+                    counter.text = count.toString()
+                    counter.visibility = if (count > 0) View.VISIBLE else View.GONE
+                }
             }
             toolbar.removeAllViews()
             content.removeAllViews()
+            savedFormat.visibility = View.GONE
             when (aggMainTab) {
                 0 -> {
                     infoFilter.text = "配置"
@@ -3039,8 +3050,9 @@ class OverlayService : Service() {
                     val savedItems = loadSavedMemoryItems()
                     val count = savedItems.size
                     infoFilter.text = "保存列表"
-                    valueFormat.visibility = View.VISIBLE
-                    valueFormat.text = currentValueFormatText()
+                    valueFormat.visibility = View.GONE
+                    savedFormat.visibility = View.VISIBLE
+                    savedFormat.text = currentValueFormatText()
                     foundCount.text = "($count)"
                     toolbarAction(R.drawable.ic_agg_lock) { showSavedListPanel() }
                     toolbarAction(R.drawable.ic_agg_back) { showSavedListImportPanel() }
