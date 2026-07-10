@@ -3,6 +3,7 @@ package com.yl.aigg.ai_gg666
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.runBlocking
+import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -22,8 +23,11 @@ object MemoryEngine {
     private var attachedPid: Int? = null
     private var activeRegions: List<MemRegion> = emptyList()
     private var lastSnapshot: Map<Long, ByteArray> = emptyMap()
+    private var lastSnapshotType: String? = null
     private val aobDatabase = mutableMapOf<Long, AobSignature>()
     private var appContext: Context? = null
+    private var lastLivenessCheckAt = 0L
+    private var lastLivenessResult = false
 
     init {
         try {
@@ -45,51 +49,104 @@ object MemoryEngine {
 
     // ==================== 进程管理 ====================
 
+    @Synchronized
     fun attachProcess(pid: Int): Boolean {
+        if (pid <= 0) return false
+        if (attachedPid == pid && activeRegions.isNotEmpty() && isAttachedProcessAlive(force = true)) {
+            return true
+        }
+
         return try {
-            // 检查 Root 权限
             if (!RootManager.checkRootAccess()) {
                 Log.e(TAG, "❌ No root access")
                 return false
             }
-            
-            // 初始化 RootScanner
-            val ctx = appContext
-            if (ctx != null) {
-                runBlocking {
-                    RootScanner.initialize(ctx)
-                }
+            if (!isPidAlive(pid)) {
+                Log.e(TAG, "❌ Process $pid is not running")
+                return false
             }
-            
-            // 解析 maps
-            activeRegions = getRegions(pid)
-            if (activeRegions.isEmpty()) {
+
+            // AGG 在切换进程时会清空旧搜索/保存状态；这里同样避免旧地址污染新进程。
+            MemoryFreezer.clearAll()
+            RootScanner.shutdown()
+            attachedPid = null
+            activeRegions = emptyList()
+            lastSnapshot = emptyMap()
+            lastSnapshotType = null
+            aobDatabase.clear()
+
+            val ctx = appContext ?: return false
+            val scannerReady = runBlocking { RootScanner.initialize(ctx) }
+            if (!scannerReady) {
+                Log.e(TAG, "❌ Root scanner initialization failed")
+                return false
+            }
+
+            val regions = getRegions(pid)
+            if (regions.isEmpty()) {
+                RootScanner.shutdown()
                 Log.e(TAG, "Process $pid has no accessible regions")
                 return false
             }
 
+            activeRegions = regions
             attachedPid = pid
-            lastSnapshot = emptyMap()
-            aobDatabase.clear()
+            lastLivenessCheckAt = System.currentTimeMillis()
+            lastLivenessResult = true
 
             val totalMB = activeRegions.sumOf { it.endAddr - it.startAddr } / 1024 / 1024
             Log.i(TAG, "✅ Attached to process $pid (${activeRegions.size} regions, ${totalMB}MB)")
             true
         } catch (e: Exception) {
+            RootScanner.shutdown()
+            attachedPid = null
+            activeRegions = emptyList()
             Log.e(TAG, "❌ Failed to attach: ${e.message}", e)
             false
         }
     }
 
+    @Synchronized
     fun detachProcess() {
+        MemoryFreezer.clearAll()
         attachedPid = null
         activeRegions = emptyList()
         lastSnapshot = emptyMap()
+        lastSnapshotType = null
         aobDatabase.clear()
+        lastLivenessResult = false
+        lastLivenessCheckAt = 0L
         RootScanner.shutdown()
     }
 
     fun getAttachedPid(): Int? = attachedPid
+
+    @Synchronized
+    fun resetSearchState() {
+        lastSnapshot = emptyMap()
+        lastSnapshotType = null
+        aobDatabase.clear()
+    }
+
+    fun isAttachedProcessAlive(force: Boolean = false): Boolean {
+        val pid = attachedPid ?: return false
+        val now = System.currentTimeMillis()
+        if (!force && now - lastLivenessCheckAt < 1000L) return lastLivenessResult
+        lastLivenessCheckAt = now
+        lastLivenessResult = isPidAlive(pid)
+        return lastLivenessResult
+    }
+
+    fun isSupportedType(type: String): Boolean = type in setOf(
+        "byte", "word", "dword", "qword", "float", "double"
+    )
+
+    private fun isPidAlive(pid: Int): Boolean {
+        if (File("/proc/$pid").exists()) return true
+        return RootManager.executeRootCommand(
+            "if [ -d /proc/$pid ]; then echo alive; else echo dead; fi"
+        )?.trim() == "alive"
+    }
 
     // ==================== 内存段解析（通过 Root Shell 一次性读取） ====================
 
@@ -145,7 +202,7 @@ object MemoryEngine {
 
     fun searchExact(value: Any, type: String): List<Map<String, Any>> {
         val pid = attachedPid ?: return emptyList()
-        if (activeRegions.isEmpty()) return emptyList()
+        if (!isSupportedType(type) || activeRegions.isEmpty() || !isAttachedProcessAlive()) return emptyList()
 
         return try {
             val targetBytes = valueToBytes(value, type) ?: return emptyList()
@@ -160,7 +217,7 @@ object MemoryEngine {
 
             // 使用 RootScanner（异步执行）
             val addresses = runBlocking {
-                RootScanner.searchExact(pid, activeRegions, typeSize, targetBytes)
+                RootScanner.searchExact(pid, activeRegions, type, typeSize, targetBytes)
             }
 
             val elapsed = (System.currentTimeMillis() - startTime) / 1000.0
@@ -176,27 +233,43 @@ object MemoryEngine {
         }
     }
 
-    fun searchByRange(minValue: Long, maxValue: Long, type: String): List<Map<String, Any>> {
+    fun searchByRange(minValue: Number, maxValue: Number, type: String): List<Map<String, Any>> {
         val pid = attachedPid ?: return emptyList()
-        if (activeRegions.isEmpty()) return emptyList()
+        if (!isSupportedType(type) || activeRegions.isEmpty() || !isAttachedProcessAlive()) return emptyList()
 
         return try {
             val typeSize = getTypeSize(type)
+            val low: Number
+            val high: Number
+            if (type == "float" || type == "double") {
+                low = minValue.toDouble()
+                high = maxValue.toDouble()
+            } else {
+                low = minValue.toLong()
+                high = maxValue.toLong()
+            }
+            if (low.toDouble() > high.toDouble()) return emptyList()
 
             val addresses = runBlocking {
-                RootScanner.searchRange(pid, activeRegions, typeSize, minValue, maxValue)
+                RootScanner.searchRange(pid, activeRegions, type, typeSize, low, high)
             }
-            
-            val placeholder: Any = if (type == "float") minValue.toFloat() else minValue
-            val results = addresses.map { addr -> createResultMap(addr, placeholder, type) }
+
+            val results = addresses.map { addr ->
+                val current = readMemory(addr, type) ?: low
+                createResultMap(addr, current, type)
+            }
             enrichWithMachineCode(pid, results)
             saveSnapshot(results, type)
             results
-        } catch (e: Exception) { emptyList() }
+        } catch (e: Exception) {
+            Log.e(TAG, "searchByRange failed: ${e.message}", e)
+            emptyList()
+        }
     }
 
     fun filterResults(previousAddresses: List<Long>, value: Any, type: String): List<Map<String, Any>> {
         val pid = attachedPid ?: return emptyList()
+        if (!isSupportedType(type) || !isAttachedProcessAlive()) return emptyList()
 
         return try {
             val typeSize = getTypeSize(type)
@@ -204,7 +277,7 @@ object MemoryEngine {
 
             // 使用模糊搜索的逻辑来过滤
             val results = mutableListOf<MutableMap<String, Any>>()
-            for (addr in previousAddresses) {
+            for (addr in previousAddresses.asSequence().distinct().take(MAX_RESULTS)) {
                 val bytes = runBlocking {
                     RootScanner.readMemory(pid, addr, typeSize)
                 }
@@ -223,8 +296,9 @@ object MemoryEngine {
 
     fun searchFuzzy(comparison: String, type: String): List<Map<String, Any>> {
         val pid = attachedPid ?: return emptyList()
+        if (!isSupportedType(type) || activeRegions.isEmpty() || !isAttachedProcessAlive()) return emptyList()
 
-        if (lastSnapshot.isEmpty()) {
+        if (lastSnapshot.isEmpty() || lastSnapshotType != type) {
             val initialResults = searchAllValues(type)
             saveSnapshot(initialResults, type)
             return initialResults
@@ -250,7 +324,7 @@ object MemoryEngine {
             }
             
             val resultAddrs = runBlocking {
-                RootScanner.searchFuzzy(pid, addresses, oldValues, mode, typeSize)
+                RootScanner.searchFuzzy(pid, addresses, oldValues, mode, type, typeSize)
             }
             
             val results = resultAddrs.map { addr ->
@@ -268,7 +342,7 @@ object MemoryEngine {
 
     fun searchAob(pattern: String, mask: String? = null): List<Map<String, Any>> {
         val pid = attachedPid ?: return emptyList()
-        if (activeRegions.isEmpty()) return emptyList()
+        if (activeRegions.isEmpty() || !isAttachedProcessAlive()) return emptyList()
 
         // 检测是否为地址格式（0x开头的单个十六进制数）
         val addrLong = parseAddress(pattern)
@@ -293,7 +367,7 @@ object MemoryEngine {
 
             addresses.map { addr ->
                 val ctx = runBlocking {
-                    RootScanner.readMemory(pid, addr - 16, patternBytes.size + 32)
+                    RootScanner.readMemory(pid, (addr - 16).coerceAtLeast(0), patternBytes.size + 32)
                 }
                 if (ctx != null) aobDatabase[addr] = AobSignature(addr, pattern, ctx, 16)
                 val mc = runBlocking { RootScanner.readMemory(pid, addr, 8) }
@@ -302,7 +376,7 @@ object MemoryEngine {
                 val valBytes = runBlocking { RootScanner.readMemory(pid, addr, 4) }
                 val actualValue: Any = if (valBytes != null) bytesToValue(valBytes, "dword") ?: 0 else 0
                 mapOf("address" to "0x${addr.toString(16).uppercase()}", "addressInt" to addr,
-                    "value" to actualValue, "type" to "aob", "isFavorite" to false, "isFrozen" to false,
+                    "value" to actualValue, "type" to "dword", "isFavorite" to false, "isFrozen" to false,
                     "machineCode" to mcStr)
             }
         } catch (e: Exception) { emptyList() }
@@ -381,6 +455,7 @@ object MemoryEngine {
 
     fun readMemory(address: Long, type: String): Any? {
         val pid = attachedPid ?: return null
+        if (address <= 0L || !isSupportedType(type) || !isAttachedProcessAlive()) return null
         return try {
             val typeSize = getTypeSize(type)
             val bytes = runBlocking {
@@ -398,6 +473,7 @@ object MemoryEngine {
 
     fun writeMemory(address: Long, value: Any, type: String): Boolean {
         val pid = attachedPid ?: return false
+        if (address <= 0L || !isSupportedType(type) || !isAttachedProcessAlive()) return false
         return try {
             val bytes = valueToBytes(value, type) ?: return false
             runBlocking {
@@ -443,12 +519,20 @@ object MemoryEngine {
         return try {
             val typeSize = getTypeSize(type)
 
-            val addresses = runBlocking {
-                RootScanner.searchRange(pid, activeRegions, typeSize, Long.MIN_VALUE, Long.MAX_VALUE)
+            val bounds: Pair<Number, Number> = when (type) {
+                "float", "double" -> -Double.MAX_VALUE to Double.MAX_VALUE
+                "byte" -> Byte.MIN_VALUE.toLong() to Byte.MAX_VALUE.toLong()
+                "word" -> Short.MIN_VALUE.toLong() to Short.MAX_VALUE.toLong()
+                "dword" -> Int.MIN_VALUE.toLong() to Int.MAX_VALUE.toLong()
+                else -> Long.MIN_VALUE to Long.MAX_VALUE
             }
-            
-            val placeholder: Any = if (type == "float") 0.0f else if (type == "double") 0.0 else 0
-            addresses.map { addr -> createResultMap(addr, placeholder, type) }
+            val addresses = runBlocking {
+                RootScanner.searchRange(pid, activeRegions, type, typeSize, bounds.first, bounds.second)
+            }
+
+            addresses.map { addr ->
+                createResultMap(addr, readMemory(addr, type) ?: 0, type)
+            }
         } catch (e: Exception) { emptyList() }
     }
 
@@ -458,7 +542,11 @@ object MemoryEngine {
         val pid = attachedPid ?: return
         val typeSize = getTypeSize(type)
         val addresses = results.mapNotNull { (it["addressInt"] as? Number)?.toLong() }
-        if (addresses.isEmpty()) return
+        if (addresses.isEmpty()) {
+            lastSnapshot = emptyMap()
+            lastSnapshotType = type
+            return
+        }
 
         val snapshot = mutableMapOf<Long, ByteArray>()
         for (addr in addresses) {
@@ -468,6 +556,7 @@ object MemoryEngine {
             if (b != null) snapshot[addr] = b
         }
         lastSnapshot = snapshot
+        lastSnapshotType = type
     }
 
     // ==================== 工具函数 ====================

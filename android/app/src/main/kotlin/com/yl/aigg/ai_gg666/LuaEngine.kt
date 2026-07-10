@@ -338,7 +338,7 @@ object LuaEngine {
                         val value = itemTable.get("value")
                         val flags = itemTable.get("flags")
                         if (!addr.isnil() && !value.isnil()) {
-                            val address = addr.tojstring().toLongOrNull(16)?.toInt() ?: continue
+                            val address = addr.tojstring().removePrefix("0x").removePrefix("0X").toLongOrNull(16) ?: continue
                             val type = luaTypeToDataType(flags.toint())
                             val numValue: Any = when (type) {
                                 "float", "double" -> value.todouble()
@@ -356,7 +356,8 @@ object LuaEngine {
         // gg.writeMemory
         gg.set("writeMemory", object : VarArgFunction() {
             override fun invoke(args: Varargs): Varargs {
-                val address = args.arg(1).tojstring().toLongOrNull(16)?.toInt() ?: return LuaValue.valueOf(false)
+                val address = args.arg(1).tojstring().removePrefix("0x").removePrefix("0X").toLongOrNull(16)
+                    ?: return LuaValue.valueOf(false)
                 val value = args.arg(2)
                 val type = luaTypeToDataType(args.arg(3).toint())
                 val numValue: Any = when (type) {
@@ -372,7 +373,8 @@ object LuaEngine {
         // gg.freeze
         gg.set("freeze", object : VarArgFunction() {
             override fun invoke(args: Varargs): Varargs {
-                val address = args.arg(1).tojstring().toLongOrNull(16)?.toInt() ?: return LuaValue.valueOf(false)
+                val address = args.arg(1).tojstring().removePrefix("0x").removePrefix("0X").toLongOrNull(16)
+                    ?: return LuaValue.valueOf(false)
                 val value = args.arg(2)
                 val type = luaTypeToDataType(args.arg(3).toint())
                 val numValue: Any = when (type) {
@@ -397,7 +399,8 @@ object LuaEngine {
                         val itemTable = item.checktable()
                         val freeze = itemTable.get("freeze")
                         if (freeze.toboolean()) {
-                            val address = itemTable.get("address").tojstring().toLongOrNull(16)?.toInt() ?: continue
+                            val address = itemTable.get("address").tojstring()
+                                .removePrefix("0x").removePrefix("0X").toLongOrNull(16) ?: continue
                             val value = itemTable.get("value")
                             val flags = itemTable.get("flags")
                             val type = luaTypeToDataType(flags.toint())

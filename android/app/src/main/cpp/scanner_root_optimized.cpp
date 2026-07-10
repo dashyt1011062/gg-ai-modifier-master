@@ -1,31 +1,21 @@
-/**
- * GG-AI Root Memory Scanner - 优化版（参考 C-Android-Memory-Tool）
- * 
- * 关键优化：
- * - 使用 pread64 直接读取 /proc/pid/mem（不需要 process_vm_readv）
- * - 4KB (0x1000) 缓冲区分块读取
- * - 类型化缓冲区（DWORD buff[1024]）提高效率
- * - 简单高效的循环结构
- */
+// GG-AI root memory scanner.
+// The command protocol is intentionally small, but every command always emits
+// exactly one JSON response so the Kotlin side can safely serialize requests.
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <cstdint>
-#include <vector>
 #include <fcntl.h>
+#include <iostream>
+#include <string>
 #include <unistd.h>
+#include <vector>
 
-#define BUFFER_SIZE 0x1000  // 4KB
-#define BUFFER_ITEMS 1024   // 4KB / 4 bytes
+#define BUFFER_SIZE (64 * 1024)
 #define MAX_RESULTS 500
-
-typedef int64_t QWORD;
-typedef int32_t DWORD;
-typedef int16_t WORD;
-typedef int8_t BYTE;
-typedef float FLOAT;
-typedef double DOUBLE;
 
 enum FuzzyMode { CHANGED = 0, UNCHANGED = 1, INCREASED = 2, DECREASED = 3 };
 
@@ -34,511 +24,535 @@ struct Region {
     uint64_t size;
 };
 
-// 全局文件句柄
 static int mem_fd = -1;
 
-// 打开 /proc/pid/mem
-static bool open_mem(int pid) {
-    if (mem_fd >= 0) close(mem_fd);
-    
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/mem", pid);
-    mem_fd = open(path, O_RDWR);
-    
-    if (mem_fd < 0) {
-        fprintf(stderr, "Failed to open %s\n", path);
-        return false;
-    }
-    return true;
+static void respond_error(const char* message) {
+    std::printf("{\"status\":\"error\",\"msg\":\"%s\"}\n", message);
+    std::fflush(stdout);
 }
 
-// 十六进制字符串转字节数组
-static std::vector<uint8_t> hex_to_bytes(const char* hex) {
+static void respond_results(const std::vector<uint64_t>& results) {
+    std::printf("{\"status\":\"ok\",\"count\":%zu,\"addrs\":\"", results.size());
+    for (size_t i = 0; i < results.size(); ++i) {
+        if (i != 0) std::printf(",");
+        std::printf("%llx", static_cast<unsigned long long>(results[i]));
+    }
+    std::printf("\"}\n");
+    std::fflush(stdout);
+}
+
+static bool open_mem(int pid) {
+    if (mem_fd >= 0) {
+        close(mem_fd);
+        mem_fd = -1;
+    }
+    char path[64];
+    std::snprintf(path, sizeof(path), "/proc/%d/mem", pid);
+    mem_fd = open(path, O_RDWR | O_CLOEXEC);
+    return mem_fd >= 0;
+}
+
+static std::vector<uint8_t> hex_to_bytes(const std::string& hex) {
     std::vector<uint8_t> bytes;
-    size_t len = strlen(hex);
-    for (size_t i = 0; i + 1 < len; i += 2) {
-        char byte_str[3] = {hex[i], hex[i+1], 0};
-        bytes.push_back((uint8_t)strtol(byte_str, nullptr, 16));
+    if ((hex.size() & 1U) != 0U) return bytes;
+    bytes.reserve(hex.size() / 2U);
+    for (size_t i = 0; i < hex.size(); i += 2U) {
+        char* end = nullptr;
+        const std::string token = hex.substr(i, 2U);
+        const long value = std::strtol(token.c_str(), &end, 16);
+        if (end == token.c_str() || *end != '\0') {
+            bytes.clear();
+            return bytes;
+        }
+        bytes.push_back(static_cast<uint8_t>(value));
     }
     return bytes;
 }
 
-// 字节数组转十六进制字符串
-static void bytes_to_hex(const uint8_t* bytes, size_t len, char* out) {
-    for (size_t i = 0; i < len; i++) {
-        sprintf(out + i * 2, "%02x", bytes[i]);
+static std::string bytes_to_hex(const uint8_t* bytes, size_t size) {
+    static const char digits[] = "0123456789abcdef";
+    std::string out(size * 2U, '0');
+    for (size_t i = 0; i < size; ++i) {
+        out[i * 2U] = digits[(bytes[i] >> 4U) & 0x0FU];
+        out[i * 2U + 1U] = digits[bytes[i] & 0x0FU];
     }
-    out[len * 2] = 0;
+    return out;
 }
 
-// ==================== 精确搜索 DWORD ====================
-static void search_exact_dword(int pid, const std::vector<Region>& regions, DWORD value) {
+static bool parse_string_field(const std::string& json, const char* key, std::string& out) {
+    const std::string marker = std::string("\"") + key + "\":\"";
+    const size_t begin = json.find(marker);
+    if (begin == std::string::npos) return false;
+    const size_t value_begin = begin + marker.size();
+    const size_t value_end = json.find('"', value_begin);
+    if (value_end == std::string::npos) return false;
+    out = json.substr(value_begin, value_end - value_begin);
+    return true;
+}
+
+static bool parse_int_field(const std::string& json, const char* key, int64_t& out) {
+    const std::string marker = std::string("\"") + key + "\":";
+    const size_t begin = json.find(marker);
+    if (begin == std::string::npos) return false;
+    const char* value = json.c_str() + begin + marker.size();
+    char* end = nullptr;
+    out = std::strtoll(value, &end, 10);
+    return end != value;
+}
+
+static bool parse_double_field(const std::string& json, const char* key, double& out) {
+    const std::string marker = std::string("\"") + key + "\":";
+    const size_t begin = json.find(marker);
+    if (begin == std::string::npos) return false;
+    const char* value = json.c_str() + begin + marker.size();
+    char* end = nullptr;
+    out = std::strtod(value, &end);
+    return end != value;
+}
+
+static std::vector<Region> parse_regions(const std::string& json) {
+    std::vector<Region> regions;
+    const size_t list_begin = json.find("\"regions\":[");
+    if (list_begin == std::string::npos) return regions;
+    size_t cursor = list_begin + std::strlen("\"regions\":[");
+    const size_t list_end = json.find(']', cursor);
+    if (list_end == std::string::npos) return regions;
+
+    while (cursor < list_end) {
+        const size_t start_pos = json.find("\"start\":", cursor);
+        const size_t size_pos = json.find("\"size\":", cursor);
+        if (start_pos == std::string::npos || size_pos == std::string::npos ||
+            start_pos >= list_end || size_pos >= list_end) {
+            break;
+        }
+
+        char* start_end = nullptr;
+        char* size_end = nullptr;
+        const uint64_t start = std::strtoull(
+            json.c_str() + start_pos + std::strlen("\"start\":"), &start_end, 10);
+        const uint64_t size = std::strtoull(
+            json.c_str() + size_pos + std::strlen("\"size\":"), &size_end, 10);
+        if (start_end == json.c_str() + start_pos + std::strlen("\"start\":") ||
+            size_end == json.c_str() + size_pos + std::strlen("\"size\":")) {
+            break;
+        }
+        if (size > 0U) regions.push_back({start, size});
+
+        const size_t object_end = json.find('}', size_pos);
+        if (object_end == std::string::npos || object_end >= list_end) break;
+        cursor = object_end + 1U;
+    }
+    return regions;
+}
+
+static std::vector<uint64_t> parse_addresses(const std::string& json) {
+    std::vector<uint64_t> addresses;
+    const size_t list_begin = json.find("\"addrs\":[");
+    if (list_begin == std::string::npos) return addresses;
+    size_t cursor = list_begin + std::strlen("\"addrs\":[");
+    const size_t list_end = json.find(']', cursor);
+    if (list_end == std::string::npos) return addresses;
+
+    while (cursor < list_end) {
+        while (cursor < list_end &&
+               (json[cursor] == ' ' || json[cursor] == ',' || json[cursor] == '"')) {
+            ++cursor;
+        }
+        if (cursor >= list_end) break;
+        char* end = nullptr;
+        const uint64_t address = std::strtoull(json.c_str() + cursor, &end, 16);
+        if (end == json.c_str() + cursor) break;
+        addresses.push_back(address);
+        cursor = static_cast<size_t>(end - json.c_str());
+    }
+    return addresses;
+}
+
+static bool is_aligned(uint64_t relative_address, int type_size) {
+    return type_size <= 1 || (relative_address % static_cast<uint64_t>(type_size)) == 0U;
+}
+
+static void search_exact(const std::vector<Region>& regions,
+                         int type_size,
+                         const std::vector<uint8_t>& target) {
+    if (type_size <= 0 || target.empty()) {
+        respond_error("invalid exact search parameters");
+        return;
+    }
+
     std::vector<uint64_t> results;
-    DWORD buff[BUFFER_ITEMS];
-    
-    for (const auto& reg : regions) {
-        uint64_t page_count = reg.size / BUFFER_SIZE;
-        
-        for (uint64_t j = 0; j < page_count && results.size() < MAX_RESULTS; j++) {
-            ssize_t got = pread64(mem_fd, buff, BUFFER_SIZE, reg.start + j * BUFFER_SIZE);
-            if (got != BUFFER_SIZE) continue;
-            
-            for (int i = 0; i < BUFFER_ITEMS; i++) {
-                if (buff[i] == value) {
-                    results.push_back(reg.start + j * BUFFER_SIZE + i * 4);
+    std::vector<uint8_t> buffer(BUFFER_SIZE);
+    const size_t overlap = target.size() > 1U ? target.size() - 1U : 0U;
+
+    for (const Region& region : regions) {
+        uint64_t offset = 0U;
+        while (offset < region.size && results.size() < MAX_RESULTS) {
+            const size_t requested = static_cast<size_t>(
+                std::min<uint64_t>(region.size - offset, buffer.size()));
+            const ssize_t read_size = pread64(mem_fd, buffer.data(), requested,
+                                              static_cast<off64_t>(region.start + offset));
+            if (read_size <= 0) {
+                offset += requested;
+                continue;
+            }
+
+            for (size_t i = 0; i + target.size() <= static_cast<size_t>(read_size); ++i) {
+                const uint64_t relative = offset + i;
+                if (!is_aligned(relative, type_size)) continue;
+                if (std::memcmp(buffer.data() + i, target.data(), target.size()) == 0) {
+                    results.push_back(region.start + relative);
                     if (results.size() >= MAX_RESULTS) break;
                 }
             }
+
+            const uint64_t advance = static_cast<uint64_t>(read_size) > overlap
+                ? static_cast<uint64_t>(read_size) - overlap
+                : static_cast<uint64_t>(read_size);
+            if (advance == 0U) break;
+            offset += advance;
         }
+        if (results.size() >= MAX_RESULTS) break;
     }
-    
-    printf("{\"status\":\"ok\",\"count\":%zu,\"addrs\":\"", results.size());
-    for (size_t i = 0; i < results.size(); i++) {
-        if (i > 0) printf(",");
-        printf("%lx", results[i]);
-    }
-    printf("\"}\n");
-    fflush(stdout);
+    respond_results(results);
 }
 
-// ==================== 精确搜索 FLOAT ====================
-static void search_exact_float(int pid, const std::vector<Region>& regions, FLOAT value) {
+static int64_t read_integer(const uint8_t* data, const std::string& type) {
+    if (type == "byte") {
+        int8_t value = 0;
+        std::memcpy(&value, data, sizeof(value));
+        return static_cast<int64_t>(value);
+    }
+    if (type == "word") {
+        int16_t value = 0;
+        std::memcpy(&value, data, sizeof(value));
+        return static_cast<int64_t>(value);
+    }
+    if (type == "dword") {
+        int32_t value = 0;
+        std::memcpy(&value, data, sizeof(value));
+        return static_cast<int64_t>(value);
+    }
+    int64_t value = 0;
+    std::memcpy(&value, data, sizeof(value));
+    return value;
+}
+
+static double read_decimal(const uint8_t* data, const std::string& type) {
+    if (type == "float") {
+        float value = 0.0F;
+        std::memcpy(&value, data, sizeof(value));
+        return static_cast<double>(value);
+    }
+    double value = 0.0;
+    std::memcpy(&value, data, sizeof(value));
+    return value;
+}
+
+static void search_range(const std::vector<Region>& regions,
+                         const std::string& type,
+                         int type_size,
+                         double low_decimal,
+                         double high_decimal,
+                         int64_t low_integer,
+                         int64_t high_integer) {
+    const bool decimal_type = type == "float" || type == "double";
+    if (type_size <= 0 ||
+        (decimal_type ? low_decimal > high_decimal : low_integer > high_integer)) {
+        respond_error("invalid range search parameters");
+        return;
+    }
     std::vector<uint64_t> results;
-    FLOAT buff[BUFFER_ITEMS];
-    
-    for (const auto& reg : regions) {
-        uint64_t page_count = reg.size / BUFFER_SIZE;
-        
-        for (uint64_t j = 0; j < page_count && results.size() < MAX_RESULTS; j++) {
-            ssize_t got = pread64(mem_fd, buff, BUFFER_SIZE, reg.start + j * BUFFER_SIZE);
-            if (got != BUFFER_SIZE) continue;
-            
-            for (int i = 0; i < BUFFER_ITEMS; i++) {
-                if (buff[i] == value) {
-                    results.push_back(reg.start + j * BUFFER_SIZE + i * 4);
+    std::vector<uint8_t> buffer(BUFFER_SIZE);
+    const size_t overlap = type_size > 1 ? static_cast<size_t>(type_size - 1) : 0U;
+
+    for (const Region& region : regions) {
+        uint64_t offset = 0U;
+        while (offset < region.size && results.size() < MAX_RESULTS) {
+            const size_t requested = static_cast<size_t>(
+                std::min<uint64_t>(region.size - offset, buffer.size()));
+            const ssize_t read_size = pread64(mem_fd, buffer.data(), requested,
+                                              static_cast<off64_t>(region.start + offset));
+            if (read_size <= 0) {
+                offset += requested;
+                continue;
+            }
+
+            for (size_t i = 0; i + static_cast<size_t>(type_size) <=
+                                static_cast<size_t>(read_size); ++i) {
+                const uint64_t relative = offset + i;
+                if (!is_aligned(relative, type_size)) continue;
+
+                bool match = false;
+                if (decimal_type) {
+                    const double value = read_decimal(buffer.data() + i, type);
+                    match = std::isfinite(value) && value >= low_decimal && value <= high_decimal;
+                } else {
+                    const int64_t value = read_integer(buffer.data() + i, type);
+                    match = value >= low_integer && value <= high_integer;
+                }
+                if (match) {
+                    results.push_back(region.start + relative);
                     if (results.size() >= MAX_RESULTS) break;
                 }
             }
+
+            const uint64_t advance = static_cast<uint64_t>(read_size) > overlap
+                ? static_cast<uint64_t>(read_size) - overlap
+                : static_cast<uint64_t>(read_size);
+            if (advance == 0U) break;
+            offset += advance;
         }
+        if (results.size() >= MAX_RESULTS) break;
     }
-    
-    printf("{\"status\":\"ok\",\"count\":%zu,\"addrs\":\"", results.size());
-    for (size_t i = 0; i < results.size(); i++) {
-        if (i > 0) printf(",");
-        printf("%lx", results[i]);
-    }
-    printf("\"}\n");
-    fflush(stdout);
+    respond_results(results);
 }
 
-// ==================== 精确搜索 DOUBLE ====================
-static void search_exact_double(int pid, const std::vector<Region>& regions, DOUBLE value) {
+static void search_aob(const std::vector<Region>& regions,
+                       const std::vector<uint8_t>& pattern,
+                       const std::vector<uint8_t>& mask) {
+    if (pattern.empty() || pattern.size() != mask.size()) {
+        respond_error("invalid aob pattern");
+        return;
+    }
+
     std::vector<uint64_t> results;
-    DOUBLE buff[BUFFER_ITEMS / 2];  // DOUBLE 是 8 字节
-    
-    for (const auto& reg : regions) {
-        uint64_t page_count = reg.size / BUFFER_SIZE;
-        
-        for (uint64_t j = 0; j < page_count && results.size() < MAX_RESULTS; j++) {
-            ssize_t got = pread64(mem_fd, buff, BUFFER_SIZE, reg.start + j * BUFFER_SIZE);
-            if (got != BUFFER_SIZE) continue;
-            
-            for (int i = 0; i < BUFFER_ITEMS / 2; i++) {
-                if (buff[i] == value) {
-                    results.push_back(reg.start + j * BUFFER_SIZE + i * 8);
-                    if (results.size() >= MAX_RESULTS) break;
-                }
+    std::vector<uint8_t> buffer(BUFFER_SIZE);
+    const size_t overlap = pattern.size() > 1U ? pattern.size() - 1U : 0U;
+
+    for (const Region& region : regions) {
+        uint64_t offset = 0U;
+        while (offset < region.size && results.size() < MAX_RESULTS) {
+            const size_t requested = static_cast<size_t>(
+                std::min<uint64_t>(region.size - offset, buffer.size()));
+            const ssize_t read_size = pread64(mem_fd, buffer.data(), requested,
+                                              static_cast<off64_t>(region.start + offset));
+            if (read_size <= 0) {
+                offset += requested;
+                continue;
             }
-        }
-    }
-    
-    printf("{\"status\":\"ok\",\"count\":%zu,\"addrs\":\"", results.size());
-    for (size_t i = 0; i < results.size(); i++) {
-        if (i > 0) printf(",");
-        printf("%lx", results[i]);
-    }
-    printf("\"}\n");
-    fflush(stdout);
-}
 
-// ==================== 范围搜索 DWORD ====================
-static void search_range_dword(int pid, const std::vector<Region>& regions, DWORD low, DWORD high) {
-    std::vector<uint64_t> results;
-    DWORD buff[BUFFER_ITEMS];
-    
-    for (const auto& reg : regions) {
-        uint64_t page_count = reg.size / BUFFER_SIZE;
-        
-        for (uint64_t j = 0; j < page_count && results.size() < MAX_RESULTS; j++) {
-            ssize_t got = pread64(mem_fd, buff, BUFFER_SIZE, reg.start + j * BUFFER_SIZE);
-            if (got != BUFFER_SIZE) continue;
-            
-            for (int i = 0; i < BUFFER_ITEMS; i++) {
-                if (buff[i] >= low && buff[i] <= high) {
-                    results.push_back(reg.start + j * BUFFER_SIZE + i * 4);
-                    if (results.size() >= MAX_RESULTS) break;
-                }
-            }
-        }
-    }
-    
-    printf("{\"status\":\"ok\",\"count\":%zu,\"addrs\":\"", results.size());
-    for (size_t i = 0; i < results.size(); i++) {
-        if (i > 0) printf(",");
-        printf("%lx", results[i]);
-    }
-    printf("\"}\n");
-    fflush(stdout);
-}
-
-// ==================== 范围搜索 FLOAT ====================
-static void search_range_float(int pid, const std::vector<Region>& regions, FLOAT low, FLOAT high) {
-    std::vector<uint64_t> results;
-    FLOAT buff[BUFFER_ITEMS];
-    
-    for (const auto& reg : regions) {
-        uint64_t page_count = reg.size / BUFFER_SIZE;
-        
-        for (uint64_t j = 0; j < page_count && results.size() < MAX_RESULTS; j++) {
-            ssize_t got = pread64(mem_fd, buff, BUFFER_SIZE, reg.start + j * BUFFER_SIZE);
-            if (got != BUFFER_SIZE) continue;
-            
-            for (int i = 0; i < BUFFER_ITEMS; i++) {
-                if (buff[i] >= low && buff[i] <= high) {
-                    results.push_back(reg.start + j * BUFFER_SIZE + i * 4);
-                    if (results.size() >= MAX_RESULTS) break;
-                }
-            }
-        }
-    }
-    
-    printf("{\"status\":\"ok\",\"count\":%zu,\"addrs\":\"", results.size());
-    for (size_t i = 0; i < results.size(); i++) {
-        if (i > 0) printf(",");
-        printf("%lx", results[i]);
-    }
-    printf("\"}\n");
-    fflush(stdout);
-}
-
-// ==================== AOB 特征码搜索 ====================
-static void search_aob(int pid, const std::vector<Region>& regions,
-                      const std::vector<uint8_t>& pattern, const std::vector<uint8_t>& mask) {
-    std::vector<uint64_t> results;
-    uint8_t buff[BUFFER_SIZE];
-    size_t pat_len = pattern.size();
-    
-    for (const auto& reg : regions) {
-        uint64_t page_count = reg.size / BUFFER_SIZE;
-        
-        for (uint64_t j = 0; j < page_count && results.size() < MAX_RESULTS; j++) {
-            ssize_t got = pread64(mem_fd, buff, BUFFER_SIZE, reg.start + j * BUFFER_SIZE);
-            if (got < (ssize_t)pat_len) continue;
-            
-            for (size_t i = 0; i + pat_len <= (size_t)got; i++) {
+            for (size_t i = 0; i + pattern.size() <= static_cast<size_t>(read_size); ++i) {
                 bool match = true;
-                for (size_t k = 0; k < pat_len; k++) {
-                    if (mask[k] == 1 && buff[i + k] != pattern[k]) {
+                for (size_t j = 0; j < pattern.size(); ++j) {
+                    if (mask[j] != 0U && buffer[i + j] != pattern[j]) {
                         match = false;
                         break;
                     }
                 }
                 if (match) {
-                    results.push_back(reg.start + j * BUFFER_SIZE + i);
+                    results.push_back(region.start + offset + i);
                     if (results.size() >= MAX_RESULTS) break;
                 }
             }
+
+            const uint64_t advance = static_cast<uint64_t>(read_size) > overlap
+                ? static_cast<uint64_t>(read_size) - overlap
+                : static_cast<uint64_t>(read_size);
+            if (advance == 0U) break;
+            offset += advance;
         }
+        if (results.size() >= MAX_RESULTS) break;
     }
-    
-    printf("{\"status\":\"ok\",\"count\":%zu,\"addrs\":\"", results.size());
-    for (size_t i = 0; i < results.size(); i++) {
-        if (i > 0) printf(",");
-        printf("%lx", results[i]);
-    }
-    printf("\"}\n");
-    fflush(stdout);
+    respond_results(results);
 }
 
-// ==================== 模糊搜索 ====================
-static void search_fuzzy(int pid, const std::vector<uint64_t>& addrs,
-                        const std::vector<uint8_t>& old_vals, int mode, int type_size) {
+static int compare_typed(const uint8_t* current,
+                         const uint8_t* previous,
+                         const std::string& type) {
+    if (type == "float" || type == "double") {
+        const double a = read_decimal(current, type);
+        const double b = read_decimal(previous, type);
+        if (a < b) return -1;
+        if (a > b) return 1;
+        return 0;
+    }
+    const int64_t a = read_integer(current, type);
+    const int64_t b = read_integer(previous, type);
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+static void search_fuzzy(const std::vector<uint64_t>& addresses,
+                         const std::vector<uint8_t>& previous_values,
+                         int mode,
+                         const std::string& type,
+                         int type_size) {
+    if (type_size <= 0 || previous_values.size() < addresses.size() *
+                                              static_cast<size_t>(type_size)) {
+        respond_error("invalid fuzzy search parameters");
+        return;
+    }
+
     std::vector<uint64_t> results;
-    uint8_t cur_buf[8];
-    
-    for (size_t i = 0; i < addrs.size(); i++) {
-        ssize_t got = pread64(mem_fd, cur_buf, type_size, addrs[i]);
-        if (got != type_size) continue;
-        
-        int64_t old_num = 0, cur_num = 0;
-        memcpy(&old_num, &old_vals[i * type_size], type_size);
-        memcpy(&cur_num, cur_buf, type_size);
-        
-        if (type_size == 4) {
-            old_num = (int32_t)old_num;
-            cur_num = (int32_t)cur_num;
-        }
-        
+    uint8_t current[8] = {0};
+    for (size_t i = 0; i < addresses.size() && results.size() < MAX_RESULTS; ++i) {
+        const ssize_t read_size = pread64(mem_fd, current, static_cast<size_t>(type_size),
+                                          static_cast<off64_t>(addresses[i]));
+        if (read_size != type_size) continue;
+        const uint8_t* previous = previous_values.data() + i * static_cast<size_t>(type_size);
+        const int comparison = compare_typed(current, previous, type);
+        const bool equal = std::memcmp(current, previous, static_cast<size_t>(type_size)) == 0;
+
         bool match = false;
         switch (mode) {
-            case CHANGED:   if (cur_num != old_num) match = true; break;
-            case UNCHANGED: if (cur_num == old_num) match = true; break;
-            case INCREASED: if (cur_num > old_num)  match = true; break;
-            case DECREASED: if (cur_num < old_num)  match = true; break;
+            case CHANGED: match = !equal; break;
+            case UNCHANGED: match = equal; break;
+            case INCREASED: match = comparison > 0; break;
+            case DECREASED: match = comparison < 0; break;
+            default: break;
         }
-        if (match) results.push_back(addrs[i]);
+        if (match) results.push_back(addresses[i]);
     }
-    
-    printf("{\"status\":\"ok\",\"count\":%zu,\"addrs\":\"", results.size());
-    for (size_t i = 0; i < results.size(); i++) {
-        if (i > 0) printf(",");
-        printf("%lx", results[i]);
-    }
-    printf("\"}\n");
-    fflush(stdout);
+    respond_results(results);
 }
 
-// ==================== 读取内存 ====================
-static void cmd_read(int pid, uint64_t addr, int size) {
-    std::vector<uint8_t> buf(size);
-    ssize_t got = pread64(mem_fd, buf.data(), size, addr);
-    
-    if (got != size) {
-        printf("{\"status\":\"error\",\"msg\":\"read failed\"}\n");
-        fflush(stdout);
+static void read_memory(uint64_t address, int size) {
+    if (size <= 0 || size > 1024 * 1024) {
+        respond_error("invalid read size");
         return;
     }
-    
-    char hex[size * 2 + 1];
-    bytes_to_hex(buf.data(), size, hex);
-    printf("{\"status\":\"ok\",\"data\":\"%s\"}\n", hex);
-    fflush(stdout);
-}
-
-// ==================== 写入内存 ====================
-static void cmd_write(int pid, uint64_t addr, const std::vector<uint8_t>& data) {
-    ssize_t wr = pwrite64(mem_fd, data.data(), data.size(), addr);
-    
-    if (wr == (ssize_t)data.size()) {
-        printf("{\"status\":\"ok\"}\n");
-    } else {
-        printf("{\"status\":\"error\",\"msg\":\"write failed\"}\n");
-    }
-    fflush(stdout);
-}
-
-// ==================== JSON 解析和命令执行 ====================
-static void parse_and_execute(const char* json_line) {
-    // 提取 cmd
-    const char* cmd_start = strstr(json_line, "\"cmd\":\"");
-    if (!cmd_start) return;
-    cmd_start += 7;
-    const char* cmd_end = strchr(cmd_start, '"');
-    if (!cmd_end) return;
-    
-    char cmd[64];
-    size_t cmd_len = cmd_end - cmd_start;
-    if (cmd_len >= sizeof(cmd)) return;
-    memcpy(cmd, cmd_start, cmd_len);
-    cmd[cmd_len] = 0;
-    
-    // 提取 pid
-    const char* pid_start = strstr(json_line, "\"pid\":");
-    if (!pid_start) return;
-    int pid = atoi(pid_start + 6);
-    
-    // 打开 /proc/pid/mem
-    if (!open_mem(pid)) {
-        printf("{\"status\":\"error\",\"msg\":\"failed to open mem\"}\n");
-        fflush(stdout);
+    std::vector<uint8_t> buffer(static_cast<size_t>(size));
+    const ssize_t read_size = pread64(mem_fd, buffer.data(), buffer.size(),
+                                      static_cast<off64_t>(address));
+    if (read_size != size) {
+        respond_error("read failed");
         return;
     }
-    
-    if (strcmp(cmd, "search_exact") == 0) {
-        // 提取 type_size
-        const char* ts_start = strstr(json_line, "\"type_size\":");
-        if (!ts_start) return;
-        int type_size = atoi(ts_start + 12);
-        
-        // 提取 target
-        const char* target_start = strstr(json_line, "\"target\":\"");
-        if (!target_start) return;
-        target_start += 10;
-        const char* target_end = strchr(target_start, '"');
-        if (!target_end) return;
-        
-        char target_hex[1024];
-        size_t target_len = target_end - target_start;
-        if (target_len >= sizeof(target_hex)) return;
-        memcpy(target_hex, target_start, target_len);
-        target_hex[target_len] = 0;
-        
-        auto target = hex_to_bytes(target_hex);
-        
-        // 提取 regions
-        std::vector<Region> regions;
-        const char* reg_start = strstr(json_line, "\"regions\":[");
-        if (reg_start) {
-            reg_start += 11;
-            while (*reg_start) {
-                const char* start_str = strstr(reg_start, "\"start\":");
-                const char* size_str = strstr(reg_start, "\"size\":");
-                if (!start_str || !size_str) break;
-                
-                Region r;
-                r.start = strtoull(start_str + 8, nullptr, 0);
-                r.size = strtoull(size_str + 7, nullptr, 0);
-                regions.push_back(r);
-                
-                reg_start = strchr(size_str, '}');
-                if (!reg_start) break;
-                reg_start++;
-            }
-        }
-        
-        // 根据类型调用不同的搜索函数
-        if (type_size == 4 && target.size() == 4) {
-            DWORD value;
-            memcpy(&value, target.data(), 4);
-            
-            // 判断是 DWORD 还是 FLOAT（简单判断：如果看起来像浮点数就用 FLOAT）
-            FLOAT fvalue;
-            memcpy(&fvalue, target.data(), 4);
-            if (fvalue > -1000000.0f && fvalue < 1000000.0f && fvalue != (FLOAT)(int)fvalue) {
-                search_exact_float(pid, regions, fvalue);
-            } else {
-                search_exact_dword(pid, regions, value);
-            }
-        } else if (type_size == 8 && target.size() == 8) {
-            DOUBLE value;
-            memcpy(&value, target.data(), 8);
-            search_exact_double(pid, regions, value);
-        }
-        
-    } else if (strcmp(cmd, "search_range") == 0) {
-        const char* ts_start = strstr(json_line, "\"type_size\":");
-        if (!ts_start) return;
-        int type_size = atoi(ts_start + 12);
-        
-        const char* low_start = strstr(json_line, "\"low\":");
-        const char* high_start = strstr(json_line, "\"high\":");
-        if (!low_start || !high_start) return;
-        
-        int64_t low = strtoll(low_start + 6, nullptr, 0);
-        int64_t high = strtoll(high_start + 7, nullptr, 0);
-        
-        std::vector<Region> regions;
-        const char* reg_start = strstr(json_line, "\"regions\":[");
-        if (reg_start) {
-            reg_start += 11;
-            while (*reg_start) {
-                const char* start_str = strstr(reg_start, "\"start\":");
-                const char* size_str = strstr(reg_start, "\"size\":");
-                if (!start_str || !size_str) break;
-                
-                Region r;
-                r.start = strtoull(start_str + 8, nullptr, 0);
-                r.size = strtoull(size_str + 7, nullptr, 0);
-                regions.push_back(r);
-                
-                reg_start = strchr(size_str, '}');
-                if (!reg_start) break;
-                reg_start++;
-            }
-        }
-        
-        if (type_size == 4) {
-            search_range_dword(pid, regions, (DWORD)low, (DWORD)high);
-        }
-        
-    } else if (strcmp(cmd, "search_aob") == 0) {
-        const char* pattern_start = strstr(json_line, "\"pattern\":\"");
-        const char* mask_start = strstr(json_line, "\"mask\":\"");
-        if (!pattern_start || !mask_start) return;
-        
-        pattern_start += 11;
-        const char* pattern_end = strchr(pattern_start, '"');
-        if (!pattern_end) return;
-        
-        char pattern_hex[4096];
-        size_t pattern_len = pattern_end - pattern_start;
-        if (pattern_len >= sizeof(pattern_hex)) return;
-        memcpy(pattern_hex, pattern_start, pattern_len);
-        pattern_hex[pattern_len] = 0;
-        
-        mask_start += 8;
-        const char* mask_end = strchr(mask_start, '"');
-        if (!mask_end) return;
-        
-        char mask_hex[4096];
-        size_t mask_len = mask_end - mask_start;
-        if (mask_len >= sizeof(mask_hex)) return;
-        memcpy(mask_hex, mask_start, mask_len);
-        mask_hex[mask_len] = 0;
-        
-        auto pattern = hex_to_bytes(pattern_hex);
-        auto mask = hex_to_bytes(mask_hex);
-        
-        std::vector<Region> regions;
-        const char* reg_start = strstr(json_line, "\"regions\":[");
-        if (reg_start) {
-            reg_start += 11;
-            while (*reg_start) {
-                const char* start_str = strstr(reg_start, "\"start\":");
-                const char* size_str = strstr(reg_start, "\"size\":");
-                if (!start_str || !size_str) break;
-                
-                Region r;
-                r.start = strtoull(start_str + 8, nullptr, 0);
-                r.size = strtoull(size_str + 7, nullptr, 0);
-                regions.push_back(r);
-                
-                reg_start = strchr(size_str, '}');
-                if (!reg_start) break;
-                reg_start++;
-            }
-        }
-        
-        search_aob(pid, regions, pattern, mask);
-        
-    } else if (strcmp(cmd, "read") == 0) {
-        const char* addr_start = strstr(json_line, "\"addr\":");
-        const char* size_start = strstr(json_line, "\"size\":");
-        if (!addr_start || !size_start) return;
-        
-        uint64_t addr = strtoull(addr_start + 7, nullptr, 0);
-        int size = atoi(size_start + 7);
-        
-        cmd_read(pid, addr, size);
-        
-    } else if (strcmp(cmd, "write") == 0) {
-        const char* addr_start = strstr(json_line, "\"addr\":");
-        const char* data_start = strstr(json_line, "\"data\":\"");
-        if (!addr_start || !data_start) return;
-        
-        uint64_t addr = strtoull(addr_start + 7, nullptr, 0);
-        data_start += 8;
-        const char* data_end = strchr(data_start, '"');
-        if (!data_end) return;
-        
-        char data_hex[4096];
-        size_t data_len = data_end - data_start;
-        if (data_len >= sizeof(data_hex)) return;
-        memcpy(data_hex, data_start, data_len);
-        data_hex[data_len] = 0;
-        
-        auto data = hex_to_bytes(data_hex);
-        cmd_write(pid, addr, data);
+    const std::string hex = bytes_to_hex(buffer.data(), buffer.size());
+    std::printf("{\"status\":\"ok\",\"data\":\"%s\"}\n", hex.c_str());
+    std::fflush(stdout);
+}
+
+static void write_memory(uint64_t address, const std::vector<uint8_t>& data) {
+    if (data.empty()) {
+        respond_error("empty write");
+        return;
     }
+    const ssize_t written = pwrite64(mem_fd, data.data(), data.size(),
+                                     static_cast<off64_t>(address));
+    if (written != static_cast<ssize_t>(data.size())) {
+        respond_error("write failed");
+        return;
+    }
+    std::printf("{\"status\":\"ok\"}\n");
+    std::fflush(stdout);
+}
+
+static void execute_command(const std::string& json) {
+    std::string command;
+    int64_t pid_value = 0;
+    if (!parse_string_field(json, "cmd", command) ||
+        !parse_int_field(json, "pid", pid_value) || pid_value <= 0) {
+        respond_error("invalid command");
+        return;
+    }
+    if (!open_mem(static_cast<int>(pid_value))) {
+        respond_error("failed to open mem");
+        return;
+    }
+
+    if (command == "search_exact") {
+        int64_t type_size_value = 0;
+        std::string target_hex;
+        if (!parse_int_field(json, "type_size", type_size_value) ||
+            !parse_string_field(json, "target", target_hex)) {
+            respond_error("missing exact search fields");
+            return;
+        }
+        search_exact(parse_regions(json), static_cast<int>(type_size_value),
+                     hex_to_bytes(target_hex));
+        return;
+    }
+
+    if (command == "search_range") {
+        int64_t type_size_value = 0;
+        int64_t low_integer = 0;
+        int64_t high_integer = 0;
+        double low_decimal = 0.0;
+        double high_decimal = 0.0;
+        std::string type;
+        if (!parse_string_field(json, "type", type) ||
+            !parse_int_field(json, "type_size", type_size_value) ||
+            !parse_int_field(json, "low", low_integer) ||
+            !parse_int_field(json, "high", high_integer) ||
+            !parse_double_field(json, "low", low_decimal) ||
+            !parse_double_field(json, "high", high_decimal)) {
+            respond_error("missing range search fields");
+            return;
+        }
+        search_range(parse_regions(json), type, static_cast<int>(type_size_value),
+                     low_decimal, high_decimal, low_integer, high_integer);
+        return;
+    }
+
+    if (command == "search_aob") {
+        std::string pattern_hex;
+        std::string mask_hex;
+        if (!parse_string_field(json, "pattern", pattern_hex) ||
+            !parse_string_field(json, "mask", mask_hex)) {
+            respond_error("missing aob fields");
+            return;
+        }
+        search_aob(parse_regions(json), hex_to_bytes(pattern_hex), hex_to_bytes(mask_hex));
+        return;
+    }
+
+    if (command == "search_fuzzy") {
+        int64_t mode_value = 0;
+        int64_t type_size_value = 0;
+        std::string type;
+        std::string old_values_hex;
+        if (!parse_int_field(json, "mode", mode_value) ||
+            !parse_int_field(json, "type_size", type_size_value) ||
+            !parse_string_field(json, "type", type) ||
+            !parse_string_field(json, "old_vals", old_values_hex)) {
+            respond_error("missing fuzzy fields");
+            return;
+        }
+        search_fuzzy(parse_addresses(json), hex_to_bytes(old_values_hex),
+                     static_cast<int>(mode_value), type,
+                     static_cast<int>(type_size_value));
+        return;
+    }
+
+    if (command == "read") {
+        int64_t address_value = 0;
+        int64_t size_value = 0;
+        if (!parse_int_field(json, "addr", address_value) ||
+            !parse_int_field(json, "size", size_value)) {
+            respond_error("missing read fields");
+            return;
+        }
+        read_memory(static_cast<uint64_t>(address_value), static_cast<int>(size_value));
+        return;
+    }
+
+    if (command == "write") {
+        int64_t address_value = 0;
+        std::string data_hex;
+        if (!parse_int_field(json, "addr", address_value) ||
+            !parse_string_field(json, "data", data_hex)) {
+            respond_error("missing write fields");
+            return;
+        }
+        write_memory(static_cast<uint64_t>(address_value), hex_to_bytes(data_hex));
+        return;
+    }
+
+    respond_error("unknown command");
 }
 
 int main() {
-    // 从 stdin 读取命令，每行一个 JSON
-    char line[65536];
-    while (fgets(line, sizeof(line), stdin)) {
-        parse_and_execute(line);
+    std::ios::sync_with_stdio(false);
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.empty()) {
+            respond_error("empty command");
+            continue;
+        }
+        execute_command(line);
     }
-    
     if (mem_fd >= 0) close(mem_fd);
     return 0;
 }

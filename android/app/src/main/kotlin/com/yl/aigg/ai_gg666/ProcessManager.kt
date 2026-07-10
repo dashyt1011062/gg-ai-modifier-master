@@ -1,8 +1,5 @@
 package com.yl.aigg.ai_gg666
 
-import android.os.Handler
-import android.os.Looper
-
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 
@@ -37,19 +34,23 @@ object ProcessManager {
                     if (parts.size < 2) continue
 
                     val pid = parts[0].toIntOrNull() ?: continue
-                    val packageName = parts[1].trim()
+                    val rawProcessName = parts[1].trim()
+                    val packageName = rawProcessName.substringBefore(':')
 
                     if (packageName.isEmpty() || !packageName.contains(".")) continue
+                    if (packageName == context.packageName) continue
 
-                    // 获取 APP 名称
                     val appName = getAppName(pm, packageName)
+                    val suffix = rawProcessName.substringAfter(':', "")
+                    val displayName = if (suffix.isBlank()) appName else "$appName · $suffix"
                     val isSystem = isSystemApp(packageName)
 
                     processes.add(
                         mapOf(
                             "pid" to pid,
                             "packageName" to packageName,
-                            "processName" to appName,
+                            "rawProcessName" to rawProcessName,
+                            "processName" to displayName,
                             "uid" to 0,
                             "isSystem" to isSystem
                         )
@@ -66,7 +67,7 @@ object ProcessManager {
         }
 
         return processes
-            .distinctBy { it["packageName"] as String }
+            .distinctBy { it["pid"] as Int }
             .sortedWith(compareBy<Map<String, Any>> {
                 val name = it["processName"] as String
                 // 中文名称排前面
@@ -99,18 +100,23 @@ object ProcessManager {
                     if (parts.size < 2) continue
 
                     val pid = parts[0].trim().toIntOrNull() ?: continue
-                    val packageName = parts[1].trim()
+                    val rawProcessName = parts[1].trim().substringBefore(' ')
+                    val packageName = rawProcessName.substringBefore(':')
 
-                    if (packageName.isEmpty()) continue
+                    if (packageName.isEmpty() || !packageName.contains(".")) continue
+                    if (packageName == context.packageName) continue
 
                     val appName = getAppName(pm, packageName)
+                    val suffix = rawProcessName.substringAfter(':', "")
+                    val displayName = if (suffix.isBlank()) appName else "$appName · $suffix"
                     val isSystem = isSystemApp(packageName)
 
                     processes.add(
                         mapOf(
                             "pid" to pid,
                             "packageName" to packageName,
-                            "processName" to appName,
+                            "rawProcessName" to rawProcessName,
+                            "processName" to displayName,
                             "uid" to 0,
                             "isSystem" to isSystem
                         )
@@ -120,7 +126,7 @@ object ProcessManager {
         } catch (e: Exception) {}
 
         return processes
-            .distinctBy { it["packageName"] as String }
+            .distinctBy { it["pid"] as Int }
             .sortedWith(compareBy<Map<String, Any>> {
                 val name = it["processName"] as String
                 if (name.isNotEmpty() && name[0].code > 127) 0 else 1

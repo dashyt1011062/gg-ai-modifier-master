@@ -3,6 +3,8 @@ package com.yl.aigg.ai_gg666
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.*
@@ -24,6 +26,7 @@ object RootScanner {
     private var scannerProcess: Process? = null
     private var scannerWriter: BufferedWriter? = null
     private var scannerReader: BufferedReader? = null
+    private val commandMutex = Mutex()
     
     /**
      * 初始化 Root Scanner（部署可执行文件并启动）
@@ -144,19 +147,21 @@ object RootScanner {
      * 发送命令并接收响应
      */
     private suspend fun sendCommand(json: String): JSONObject? = withContext(Dispatchers.IO) {
-        try {
-            val writer = scannerWriter ?: return@withContext null
-            val reader = scannerReader ?: return@withContext null
-            
-            writer.write(json)
-            writer.write("\n")
-            writer.flush()
-            
-            val response = reader.readLine() ?: return@withContext null
-            JSONObject(response)
-        } catch (e: Exception) {
-            Log.e(TAG, "sendCommand failed: ${e.message}", e)
-            null
+        commandMutex.withLock {
+            try {
+                val writer = scannerWriter ?: return@withLock null
+                val reader = scannerReader ?: return@withLock null
+
+                writer.write(json)
+                writer.write("\n")
+                writer.flush()
+
+                val response = reader.readLine() ?: return@withLock null
+                JSONObject(response)
+            } catch (e: Exception) {
+                Log.e(TAG, "sendCommand failed: ${e.message}", e)
+                null
+            }
         }
     }
     
@@ -166,6 +171,7 @@ object RootScanner {
     suspend fun searchExact(
         pid: Int,
         regions: List<MemoryEngine.MemRegion>,
+        type: String,
         typeSize: Int,
         targetBytes: ByteArray
     ): List<Long> = withContext(Dispatchers.IO) {
@@ -175,7 +181,7 @@ object RootScanner {
                 "{\"start\":${it.startAddr},\"size\":${it.endAddr - it.startAddr}}" 
             }
             
-            val json = """{"cmd":"search_exact","pid":$pid,"regions":[$regionsJson],"type_size":$typeSize,"target":"$targetHex"}"""
+            val json = """{"cmd":"search_exact","pid":$pid,"regions":[$regionsJson],"type":"$type","type_size":$typeSize,"target":"$targetHex"}"""
             
             val response = sendCommand(json) ?: return@withContext emptyList()
             
@@ -199,16 +205,17 @@ object RootScanner {
     suspend fun searchRange(
         pid: Int,
         regions: List<MemoryEngine.MemRegion>,
+        type: String,
         typeSize: Int,
-        lowBound: Long,
-        highBound: Long
+        lowBound: Number,
+        highBound: Number
     ): List<Long> = withContext(Dispatchers.IO) {
         try {
             val regionsJson = regions.joinToString(",") { 
                 "{\"start\":${it.startAddr},\"size\":${it.endAddr - it.startAddr}}" 
             }
             
-            val json = """{"cmd":"search_range","pid":$pid,"regions":[$regionsJson],"type_size":$typeSize,"low":$lowBound,"high":$highBound}"""
+            val json = """{"cmd":"search_range","pid":$pid,"regions":[$regionsJson],"type":"$type","type_size":$typeSize,"low":$lowBound,"high":$highBound}"""
             
             val response = sendCommand(json) ?: return@withContext emptyList()
             
@@ -268,13 +275,14 @@ object RootScanner {
         addresses: List<Long>,
         oldValues: ByteArray,
         mode: Int,
+        type: String,
         typeSize: Int
     ): List<Long> = withContext(Dispatchers.IO) {
         try {
             val addrsStr = addresses.joinToString(",") { it.toString(16) }
             val valsHex = oldValues.joinToString("") { "%02x".format(it) }
             
-            val json = """{"cmd":"search_fuzzy","pid":$pid,"addrs":[$addrsStr],"old_vals":"$valsHex","mode":$mode,"type_size":$typeSize}"""
+            val json = """{"cmd":"search_fuzzy","pid":$pid,"addrs":[$addrsStr],"old_vals":"$valsHex","mode":$mode,"type":"$type","type_size":$typeSize}"""
             
             val response = sendCommand(json) ?: return@withContext emptyList()
             

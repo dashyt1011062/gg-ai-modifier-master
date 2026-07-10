@@ -74,14 +74,25 @@ class MainActivity : FlutterActivity() {
                     }.start()
                 }
                 "attachProcess" -> {
-                    val pid = call.argument<Int>("pid")
-                    if (pid == null) {
+                    val pid = call.argument<Number>("pid")?.toInt()
+                    val packageName = call.argument<String>("packageName")
+                    val processName = call.argument<String>("processName")
+                    if (pid == null || pid <= 0) {
                         result.error("INVALID_PID", "PID is required", null)
                         return@setMethodCallHandler
                     }
                     Thread {
                         try {
                             val success = MemoryEngine.attachProcess(pid)
+                            if (success) {
+                                getSharedPreferences("gg_overlay", Context.MODE_PRIVATE).edit().apply {
+                                    putInt("attached_pid", pid)
+                                    packageName?.let { putString("attached_package", it) }
+                                    processName?.let { putString("attached_name", it) }
+                                    putLong("attached_time", System.currentTimeMillis())
+                                    apply()
+                                }
+                            }
                             runOnUiThread { result.success(success) }
                         } catch (e: Exception) {
                             runOnUiThread { result.error("ATTACH_ERROR", e.message, null) }
@@ -92,6 +103,12 @@ class MainActivity : FlutterActivity() {
                     Thread {
                         try {
                             MemoryEngine.detachProcess()
+                            getSharedPreferences("gg_overlay", Context.MODE_PRIVATE).edit()
+                                .remove("attached_pid")
+                                .remove("attached_package")
+                                .remove("attached_name")
+                                .remove("attached_time")
+                                .apply()
                             runOnUiThread { result.success(true) }
                         } catch (e: Exception) {
                             runOnUiThread { result.error("DETACH_ERROR", e.message, null) }
@@ -99,22 +116,27 @@ class MainActivity : FlutterActivity() {
                     }.start()
                 }
                 "getAttachedPid" -> {
-                    // 优先从 SharedPreferences 读取（悬浮窗可能已附加）
-                    val prefs = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
-                    val savedPid = prefs.getInt("attached_pid", -1)
-                    val currentPid = MemoryEngine.getAttachedPid()
-                    
-                    // 如果有保存的 PID 且与当前不同，则重新附加
-                    if (savedPid > 0 && currentPid != savedPid) {
-                        try {
-                            MemoryEngine.attachProcess(savedPid)
-                        } catch (e: Exception) {
-                            // 附加失败，清除保存的信息
-                            prefs.edit().clear().apply()
+                    Thread {
+                        val prefs = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
+                        val savedPid = prefs.getInt("attached_pid", -1)
+                        var currentPid = MemoryEngine.getAttachedPid()
+                        if (currentPid != null && !MemoryEngine.isAttachedProcessAlive(force = true)) {
+                            MemoryEngine.detachProcess()
+                            currentPid = null
                         }
-                    }
-                    
-                    result.success(MemoryEngine.getAttachedPid())
+                        if (savedPid > 0 && currentPid != savedPid) {
+                            val restored = try { MemoryEngine.attachProcess(savedPid) } catch (_: Exception) { false }
+                            if (!restored) {
+                                prefs.edit()
+                                    .remove("attached_pid")
+                                    .remove("attached_package")
+                                    .remove("attached_name")
+                                    .remove("attached_time")
+                                    .apply()
+                            }
+                        }
+                        runOnUiThread { result.success(MemoryEngine.getAttachedPid()) }
+                    }.start()
                 }
 
                 // 内存搜索（全部在后台线程执行）
@@ -135,7 +157,9 @@ class MainActivity : FlutterActivity() {
                     }.start()
                 }
                 "filterResults" -> {
-                    val prevAddresses = (call.argument<List<Int>>("previousAddresses") ?: emptyList()).map { it.toLong() }
+                    val prevAddresses = call.argument<List<*>>("previousAddresses")
+                        ?.mapNotNull { (it as? Number)?.toLong() }
+                        ?: emptyList()
                     val value = call.argument<Any>("value")
                     if (value == null) {
                         result.error("INVALID_VALUE", "Value is required", null)
@@ -161,7 +185,7 @@ class MainActivity : FlutterActivity() {
                     val type = call.argument<String>("type") ?: "dword"
                     Thread {
                         try {
-                            val results = MemoryEngine.searchByRange(minValue.toLong(), maxValue.toLong(), type)
+                            val results = MemoryEngine.searchByRange(minValue, maxValue, type)
                             runOnUiThread { result.success(results) }
                         } catch (e: Exception) {
                             runOnUiThread { result.error("RANGE_SEARCH_ERROR", e.message, null) }
@@ -215,8 +239,8 @@ class MainActivity : FlutterActivity() {
 
                 // 内存读写（全部在后台线程执行）
                 "readMemory" -> {
-                    val address = call.argument<Int>("address")
-                    if (address == null) {
+                    val address = call.argument<Number>("address")?.toLong()
+                    if (address == null || address <= 0L) {
                         result.error("INVALID_ADDRESS", "Address is required", null)
                         return@setMethodCallHandler
                     }
@@ -231,9 +255,9 @@ class MainActivity : FlutterActivity() {
                     }.start()
                 }
                 "writeMemory" -> {
-                    val address = call.argument<Int>("address")
+                    val address = call.argument<Number>("address")?.toLong()
                     val value = call.argument<Any>("value")
-                    if (address == null || value == null) {
+                    if (address == null || address <= 0L || value == null) {
                         result.error("INVALID_PARAMS", "Address and value are required", null)
                         return@setMethodCallHandler
                     }
@@ -261,9 +285,9 @@ class MainActivity : FlutterActivity() {
 
                 // 内存冻结
                 "freezeMemory" -> {
-                    val address = call.argument<Int>("address")
+                    val address = call.argument<Number>("address")?.toLong()
                     val value = call.argument<Any>("value")
-                    if (address == null || value == null) {
+                    if (address == null || address <= 0L || value == null) {
                         result.error("INVALID_PARAMS", "Address and value are required", null)
                         return@setMethodCallHandler
                     }
@@ -275,8 +299,8 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "unfreezeMemory" -> {
-                    val address = call.argument<Int>("address")
-                    if (address == null) {
+                    val address = call.argument<Number>("address")?.toLong()
+                    if (address == null || address <= 0L) {
                         result.error("INVALID_ADDRESS", "Address is required", null)
                         return@setMethodCallHandler
                     }
@@ -306,8 +330,8 @@ class MainActivity : FlutterActivity() {
                     }.start()
                 }
                 "analyzeMemoryRegion" -> {
-                    val address = call.argument<Int>("address")
-                    if (address == null) {
+                    val address = call.argument<Number>("address")?.toLong()
+                    if (address == null || address <= 0L) {
                         result.error("INVALID_ADDRESS", "Address is required", null)
                         return@setMethodCallHandler
                     }
@@ -671,7 +695,7 @@ class MainActivity : FlutterActivity() {
                     else -> "dword"
                 }
 
-                val address = addrStr.toLongOrNull(16)?.toInt() ?: continue
+                val address = addrStr.removePrefix("0x").removePrefix("0X").toLongOrNull(16) ?: continue
                 val value: Any = when (type) {
                     "float", "double" -> valueStr.toDoubleOrNull() ?: 0.0
                     else -> valueStr.toLongOrNull() ?: 0

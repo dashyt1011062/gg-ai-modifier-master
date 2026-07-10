@@ -1,81 +1,131 @@
 package com.yl.aigg.ai_gg666
 
+import android.util.Log
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+
 /**
- * 内存冻结器
- * 后台线程持续写入目标值，防止游戏自动修改数据
+ * 内存冻结器。
+ *
+ * 行为参考 AGG 的保存列表：冻结项与当前进程绑定，后台按固定周期重写；
+ * 切换/退出进程时清空旧项，避免把旧地址写进新进程。
  */
 object MemoryFreezer {
 
-    private val frozenAddresses = mutableMapOf<Int, Map<String, Any>>()
-    private var freezeThread: Thread? = null
-    private var isRunning = false
+    private const val TAG = "MemoryFreezer"
+    private const val FREEZE_INTERVAL_MS = 120L
+    private const val MAX_CONSECUTIVE_FAILURES = 8
 
-    /**
-     * 冻结内存地址
-     */
-    fun freeze(address: Int, value: Any, type: String): Boolean {
-        frozenAddresses[address] = mapOf(
-            "address" to address,
-            "value" to value,
-            "type" to type
+    private data class FrozenItem(
+        val pid: Int,
+        val address: Long,
+        @Volatile var value: Any,
+        @Volatile var type: String,
+        @Volatile var failures: Int = 0,
+    )
+
+    private val frozenAddresses = ConcurrentHashMap<Long, FrozenItem>()
+    private val running = AtomicBoolean(false)
+    @Volatile private var freezeThread: Thread? = null
+
+    fun freeze(address: Long, value: Any, type: String): Boolean {
+        val pid = MemoryEngine.getAttachedPid() ?: return false
+        if (!MemoryEngine.isAttachedProcessAlive()) return false
+        if (!MemoryEngine.isSupportedType(type)) return false
+
+        // 先写一次，确认地址和类型有效，再加入持续冻结列表。
+        if (!MemoryEngine.writeMemory(address, value, type)) return false
+
+        frozenAddresses[address] = FrozenItem(
+            pid = pid,
+            address = address,
+            value = value,
+            type = type,
         )
         startFreezingIfNeeded()
         return true
     }
 
-    /**
-     * 解除冻结
-     */
-    fun unfreeze(address: Int): Boolean {
-        frozenAddresses.remove(address)
-        if (frozenAddresses.isEmpty()) {
-            stopFreezing()
-        }
-        return true
+    fun unfreeze(address: Long): Boolean {
+        val removed = frozenAddresses.remove(address) != null
+        if (frozenAddresses.isEmpty()) stopFreezing()
+        return removed
     }
 
-    /**
-     * 获取所有冻结地址
-     */
+    fun isFrozen(address: Long): Boolean = frozenAddresses.containsKey(address)
+
     fun getFrozenAddresses(): List<Map<String, Any>> {
-        return frozenAddresses.values.toList()
-    }
-
-    /**
-     * 启动冻结守护线程
-     */
-    private fun startFreezingIfNeeded() {
-        if (isRunning) return
-
-        isRunning = true
-        freezeThread = Thread {
-            while (isRunning && frozenAddresses.isNotEmpty()) {
-                for ((address, info) in frozenAddresses) {
-                    val value = info["value"] ?: continue
-                    val type = info["type"] as? String ?: "dword"
-                    try {
-                        MemoryEngine.writeMemory(address, value, type)
-                    } catch (e: Exception) {
-                        // 写入失败，跳过
-                    }
-                }
-                try {
-                    Thread.sleep(100) // 每 100ms 写入一次
-                } catch (e: InterruptedException) {
-                    break
-                }
+        return frozenAddresses.values
+            .sortedBy { it.address }
+            .map {
+                mapOf(
+                    "pid" to it.pid,
+                    "address" to it.address,
+                    "addressText" to "0x${it.address.toString(16).uppercase()}",
+                    "value" to it.value,
+                    "type" to it.type,
+                    "failures" to it.failures,
+                )
             }
-            isRunning = false
-        }
-        freezeThread?.isDaemon = true
-        freezeThread?.start()
     }
 
-    /**
-     * 停止冻结
-     */
+    fun clearAll() {
+        frozenAddresses.clear()
+        stopFreezing()
+    }
+
+    private fun startFreezingIfNeeded() {
+        if (!running.compareAndSet(false, true)) return
+
+        freezeThread = Thread({
+            try {
+                while (running.get()) {
+                    val currentPid = MemoryEngine.getAttachedPid()
+                    if (currentPid == null || !MemoryEngine.isAttachedProcessAlive()) {
+                        frozenAddresses.clear()
+                        break
+                    }
+
+                    for ((address, item) in frozenAddresses.entries.toList()) {
+                        if (item.pid != currentPid) {
+                            frozenAddresses.remove(address)
+                            continue
+                        }
+
+                        val success = try {
+                            MemoryEngine.writeMemory(item.address, item.value, item.type)
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "freeze write failed at 0x${item.address.toString(16)}", t)
+                            false
+                        }
+
+                        if (success) {
+                            item.failures = 0
+                        } else {
+                            item.failures += 1
+                            if (item.failures >= MAX_CONSECUTIVE_FAILURES) {
+                                frozenAddresses.remove(address)
+                            }
+                        }
+                    }
+
+                    if (frozenAddresses.isEmpty()) break
+                    Thread.sleep(FREEZE_INTERVAL_MS)
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            } finally {
+                running.set(false)
+                freezeThread = null
+            }
+        }, "memory-freezer").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
     private fun stopFreezing() {
-        isRunning = false
+        running.set(false)
         freezeThread?.interrupt()
         freezeThread = null
     }
