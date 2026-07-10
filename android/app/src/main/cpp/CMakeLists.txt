@@ -16,3 +16,10 @@ add_executable(scanner_root scanner_root_optimized.cpp)
 set_target_properties(scanner_root PROPERTIES CXX_STANDARD 11)
 target_compile_options(scanner_root PRIVATE -O3 -ffast-math -funroll-loops -static-libstdc++)
 target_link_options(scanner_root PRIVATE -static-libstdc++)
+
+
+# Root perf hardware breakpoint helper
+add_executable(perf_bp_root perf_bp_root.cpp)
+set_target_properties(perf_bp_root PROPERTIES CXX_STANDARD 11)
+target_compile_options(perf_bp_root PRIVATE -O2 -static-libstdc++)
+target_link_options(perf_bp_root PRIVATE -static-libstdc++)
