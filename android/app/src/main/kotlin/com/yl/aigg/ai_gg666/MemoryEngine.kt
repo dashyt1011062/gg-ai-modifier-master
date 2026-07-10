@@ -782,6 +782,117 @@ object MemoryEngine {
         }.thenBy { (it["addressInt"] as? Number)?.toLong() ?: Long.MAX_VALUE })
     }
 
+    fun searchPointerChains(
+        targetAddresses: List<Long>,
+        maxOffset: Long,
+        maxDepth: Int,
+        memoryFrom: Long = 0L,
+        memoryTo: Long = -1L,
+        limit: Int = 500,
+    ): List<Map<String, Any>> {
+        if (!isAttachedProcessAlive() || maxOffset < 0L) return emptyList()
+        val targets = targetAddresses.filter { it > 0L }.distinct().take(64)
+        if (targets.isEmpty()) return emptyList()
+        val depth = maxDepth.coerceIn(1, 4)
+        val safeLimit = limit.coerceIn(1, 3000)
+
+        data class Chain(
+            val rootAddress: Long,
+            val finalTarget: Long,
+            val offsets: List<Long>,
+            val addresses: List<Long>,
+            val rootType: String,
+        )
+
+        var frontier = linkedMapOf<Long, MutableList<Chain>>()
+        targets.forEach { target ->
+            frontier.getOrPut(target) { mutableListOf() }.add(
+                Chain(
+                    rootAddress = target,
+                    finalTarget = target,
+                    offsets = emptyList(),
+                    addresses = emptyList(),
+                    rootType = if (target > 0xFFFF_FFFFL) "qword" else "dword",
+                )
+            )
+        }
+
+        val output = mutableListOf<Map<String, Any>>()
+        for (level in 1..depth) {
+            if (frontier.isEmpty() || output.size >= safeLimit) break
+            val levelsLeft = depth - level + 1
+            val levelBudget = ((safeLimit - output.size) / levelsLeft).coerceAtLeast(1)
+            val levelOutputLimit = (output.size + levelBudget).coerceAtMost(safeLimit)
+            val parentResults = searchPointers(
+                targetAddresses = frontier.keys.toList(),
+                maxOffset = maxOffset,
+                memoryFrom = memoryFrom,
+                memoryTo = memoryTo,
+                limit = (levelBudget * 4).coerceAtMost(safeLimit).coerceAtLeast(1),
+            )
+            if (parentResults.isEmpty()) break
+
+            val next = linkedMapOf<Long, MutableList<Chain>>()
+            for (result in parentResults) {
+                val candidate = (result["addressInt"] as? Number)?.toLong() ?: continue
+                val pointedTarget = (result["pointerTarget"] as? Number)?.toLong() ?: continue
+                val offset = (result["pointerOffset"] as? Number)?.toLong() ?: continue
+                val type = result["type"]?.toString() ?: "qword"
+                val children = frontier[pointedTarget] ?: continue
+                for (child in children.take(16)) {
+                    val chain = Chain(
+                        rootAddress = candidate,
+                        finalTarget = child.finalTarget,
+                        offsets = listOf(offset) + child.offsets,
+                        addresses = listOf(candidate) + child.addresses,
+                        rootType = type,
+                    )
+                    val expression = buildString {
+                        append("0x${chain.rootAddress.toString(16).uppercase()}")
+                        chain.offsets.forEach { value ->
+                            insert(0, "[")
+                            append("] + 0x${value.toString(16).uppercase()}")
+                        }
+                        append(" -> 0x${chain.finalTarget.toString(16).uppercase()}")
+                    }
+                    output.add(
+                        result.toMutableMap().apply {
+                            this["address"] = "0x${chain.rootAddress.toString(16).uppercase()}"
+                            this["addressInt"] = chain.rootAddress
+                            this["type"] = chain.rootType
+                            this["pointerDepth"] = level
+                            this["pointerOffsets"] = chain.offsets
+                            this["pointerOffsetsText"] = chain.offsets.joinToString(" → ") { "+0x${it.toString(16).uppercase()}" }
+                            this["pointerChainAddresses"] = chain.addresses
+                            this["pointerTarget"] = chain.finalTarget
+                            this["pointerTargetText"] = "0x${chain.finalTarget.toString(16).uppercase()}"
+                            this["pointerExpression"] = expression
+                        }
+                    )
+                    next.getOrPut(candidate) { mutableListOf() }.add(chain)
+                    if (output.size >= levelOutputLimit) break
+                }
+                if (output.size >= levelOutputLimit) break
+            }
+            frontier = next
+        }
+
+        return output
+            .distinctBy { item ->
+                listOf(
+                    item["addressInt"],
+                    item["pointerDepth"],
+                    item["pointerOffsetsText"],
+                    item["pointerTarget"],
+                ).joinToString(":")
+            }
+            .sortedWith(
+                compareBy<Map<String, Any>> { (it["pointerDepth"] as? Number)?.toInt() ?: Int.MAX_VALUE }
+                    .thenBy { (it["addressInt"] as? Number)?.toLong() ?: Long.MAX_VALUE }
+            )
+            .take(safeLimit)
+    }
+
     private fun searchAllValues(type: String): List<Map<String, Any>> {
         val pid = attachedPid ?: return emptyList()
         if (activeRegions.isEmpty()) return emptyList()

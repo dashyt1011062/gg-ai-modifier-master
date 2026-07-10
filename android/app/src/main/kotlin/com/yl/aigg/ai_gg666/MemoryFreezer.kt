@@ -18,8 +18,10 @@ object MemoryFreezer {
     const val FREEZE_IN_RANGE = 3
 
     private const val TAG = "MemoryFreezer"
-    private const val FREEZE_INTERVAL_MS = 120L
+    private const val DEFAULT_FREEZE_INTERVAL_MS = 120L
     private const val MAX_CONSECUTIVE_FAILURES = 8
+
+    @Volatile private var freezeIntervalMs = DEFAULT_FREEZE_INTERVAL_MS
 
     private data class FrozenItem(
         val pid: Int,
@@ -76,6 +78,13 @@ object MemoryFreezer {
     fun isFrozen(address: Long): Boolean = frozenAddresses.containsKey(address)
 
     fun getFreezeType(address: Long): Int? = frozenAddresses[address]?.freezeType
+
+    fun setFreezeInterval(intervalMs: Long): Long {
+        freezeIntervalMs = intervalMs.coerceIn(20L, 5000L)
+        return freezeIntervalMs
+    }
+
+    fun getFreezeInterval(): Long = freezeIntervalMs
 
     fun getFrozenAddresses(): List<Map<String, Any?>> {
         return frozenAddresses.values
@@ -203,7 +212,7 @@ object MemoryFreezer {
                     }
 
                     if (frozenAddresses.isEmpty()) break
-                    Thread.sleep(FREEZE_INTERVAL_MS)
+                    Thread.sleep(freezeIntervalMs)
                 }
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()

@@ -1,165 +1,142 @@
 package com.yl.aigg.ai_gg666
 
+import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 
 /**
- * 进程管理器
- * 使用 pm list packages 快速获取已安装应用，再查找对应 PID
- * 类似 GG 修改器的方式，瞬间出结果
+ * AGG 风格运行进程枚举。
+ *
+ * 分类规则与 AGG 的“进程过滤”含义保持一致：
+ * - 系统应用进程：能映射到已安装 APK，且 ApplicationInfo 带系统应用标志。
+ * - Linux 进程：无法映射到已安装 APK 的原生/守护进程。
+ * - 应用子进程（package:remote）仍归属对应 APK，不视为 Linux 进程。
  */
 object ProcessManager {
 
-    private var appInfoCache: Map<String, ApplicationInfo> = emptyMap()
+    private data class AppMeta(
+        val info: ApplicationInfo,
+        val label: String,
+        val isSystem: Boolean,
+    )
 
-    /**
-     * 获取运行中的应用进程列表
-     * 使用 pm + ps 快速获取，避免遍历 /proc
-     */
-    fun getProcessList(context: android.content.Context): List<Map<String, Any>> {
-        val processes = mutableListOf<Map<String, Any>>()
+    @Volatile
+    private var appCache: Map<String, AppMeta> = emptyMap()
 
-        try {
-            // 获取已安装的第三方应用信息（用于显示APP名称）
-            val pm = context.packageManager
-            val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-            appInfoCache = installedApps.associateBy { it.packageName }
+    fun getProcessList(context: Context): List<Map<String, Any>> {
+        val pm = context.packageManager
+        refreshAppCache(pm)
 
-            // 使用 ps 命令快速获取运行中的进程
-            val psResult = RootManager.executeRootCommand("ps -A -o PID,NAME")
-            if (psResult != null) {
-                for (line in psResult.lines()) {
-                    if (line.isBlank() || line.startsWith("PID")) continue
-                    val parts = line.trim().split(Regex("\\s+"), limit = 2)
-                    if (parts.size < 2) continue
-
-                    val pid = parts[0].toIntOrNull() ?: continue
-                    val rawProcessName = parts[1].trim()
-                    val packageName = rawProcessName.substringBefore(':')
-
-                    if (packageName.isEmpty() || !packageName.contains(".")) continue
-                    if (packageName == context.packageName) continue
-
-                    val appName = getAppName(pm, packageName)
-                    val suffix = rawProcessName.substringAfter(':', "")
-                    val displayName = if (suffix.isBlank()) appName else "$appName · $suffix"
-                    val isSystem = isSystemApp(packageName)
-
-                    processes.add(
-                        mapOf(
-                            "pid" to pid,
-                            "packageName" to packageName,
-                            "rawProcessName" to rawProcessName,
-                            "processName" to displayName,
-                            "uid" to 0,
-                            "isSystem" to isSystem
-                        )
-                    )
-                }
-            }
-
-            // 如果 ps 命令失败，尝试备用方案
-            if (processes.isEmpty()) {
-                return getProcessListFallback(context)
-            }
-        } catch (e: Exception) {
-            return getProcessListFallback(context)
-        }
+        val primary = parsePsOutput(
+            context = context,
+            output = RootManager.executeRootCommand("ps -A -o PID,UID,NAME 2>/dev/null"),
+            hasIdentityColumn = true,
+        )
+        val processes = if (primary.isNotEmpty()) primary else getProcessListFallback(context)
 
         return processes
             .distinctBy { it["pid"] as Int }
-            .sortedWith(compareBy<Map<String, Any>> {
-                val name = it["processName"] as String
-                // 中文名称排前面
-                if (name.isNotEmpty() && name[0].code > 127) 0 else 1
-            }.thenBy { it["processName"] as String })
-    }
-
-    /**
-     * 备用方案：使用 pm list packages + cat /proc/pid/cmdline
-     */
-    private fun getProcessListFallback(context: android.content.Context): List<Map<String, Any>> {
-        val processes = mutableListOf<Map<String, Any>>()
-
-        try {
-            val pm = context.packageManager
-
-            // 获取所有运行中的进程 PID 和包名
-            val procResult = RootManager.executeRootCommand(
-                "for pid in /proc/[0-9]*; do " +
-                "p=\${pid##*/}; " +
-                "c=\$(cat /proc/\$p/cmdline 2>/dev/null | tr '\\0' ' ' | sed 's/ *$//'); " +
-                "[ -n \"\$c\" ] && echo \"\$p|\$c\"; " +
-                "done"
+            .sortedWith(
+                compareBy<Map<String, Any>> {
+                    when {
+                        it["isLinux"] == true -> 2
+                        it["isSystem"] == true -> 1
+                        else -> 0
+                    }
+                }.thenBy {
+                    val name = it["processName"]?.toString().orEmpty()
+                    if (name.firstOrNull()?.code?.let { code -> code > 127 } == true) 0 else 1
+                }.thenBy { it["processName"]?.toString().orEmpty().lowercase() }
+                    .thenBy { it["pid"] as Int }
             )
-
-            if (procResult != null) {
-                for (line in procResult.lines()) {
-                    if (line.isBlank() || !line.contains("|")) continue
-                    val parts = line.split("|", limit = 2)
-                    if (parts.size < 2) continue
-
-                    val pid = parts[0].trim().toIntOrNull() ?: continue
-                    val rawProcessName = parts[1].trim().substringBefore(' ')
-                    val packageName = rawProcessName.substringBefore(':')
-
-                    if (packageName.isEmpty() || !packageName.contains(".")) continue
-                    if (packageName == context.packageName) continue
-
-                    val appName = getAppName(pm, packageName)
-                    val suffix = rawProcessName.substringAfter(':', "")
-                    val displayName = if (suffix.isBlank()) appName else "$appName · $suffix"
-                    val isSystem = isSystemApp(packageName)
-
-                    processes.add(
-                        mapOf(
-                            "pid" to pid,
-                            "packageName" to packageName,
-                            "rawProcessName" to rawProcessName,
-                            "processName" to displayName,
-                            "uid" to 0,
-                            "isSystem" to isSystem
-                        )
-                    )
-                }
-            }
-        } catch (e: Exception) {}
-
-        return processes
-            .distinctBy { it["pid"] as Int }
-            .sortedWith(compareBy<Map<String, Any>> {
-                val name = it["processName"] as String
-                if (name.isNotEmpty() && name[0].code > 127) 0 else 1
-            }.thenBy { it["processName"] as String })
     }
 
-    /**
-     * 获取 APP 显示名称
-     */
-    private fun getAppName(pm: PackageManager, packageName: String): String {
-        return try {
-            val appInfo = appInfoCache[packageName]
-            if (appInfo != null) {
-                pm.getApplicationLabel(appInfo).toString()
-            } else {
-                packageName
+    private fun refreshAppCache(pm: PackageManager) {
+        appCache = try {
+            pm.getInstalledApplications(PackageManager.GET_META_DATA).associate { info ->
+                val isSystem = (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0 ||
+                        (info.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+                info.packageName to AppMeta(
+                    info = info,
+                    label = runCatching { pm.getApplicationLabel(info).toString() }
+                        .getOrDefault(info.packageName),
+                    isSystem = isSystem,
+                )
             }
-        } catch (e: Exception) {
-            packageName
+        } catch (_: Exception) {
+            emptyMap()
         }
     }
 
+    private fun parsePsOutput(
+        context: Context,
+        output: String?,
+        hasIdentityColumn: Boolean,
+    ): MutableList<Map<String, Any>> {
+        val processes = mutableListOf<Map<String, Any>>()
+        if (output.isNullOrBlank()) return processes
+
+        output.lineSequence().forEach { sourceLine ->
+            val line = sourceLine.trim()
+            if (line.isBlank() || line.startsWith("PID", ignoreCase = true)) return@forEach
+
+            val parts = line.split(Regex("\\s+"), limit = if (hasIdentityColumn) 3 else 2)
+            val required = if (hasIdentityColumn) 3 else 2
+            if (parts.size < required) return@forEach
+
+            val pid = parts[0].toIntOrNull() ?: return@forEach
+            val identity = if (hasIdentityColumn) parts[1] else ""
+            val rawProcessName = parts[if (hasIdentityColumn) 2 else 1]
+                .trim()
+                .substringBefore(' ')
+                .trimEnd('\u0000')
+            if (rawProcessName.isBlank()) return@forEach
+
+            val baseName = rawProcessName.substringBefore(':')
+            if (baseName == context.packageName || rawProcessName == context.packageName) return@forEach
+
+            val meta = appCache[baseName]
+            val isLinux = meta == null
+            val suffix = rawProcessName.substringAfter(':', "")
+            val displayName = when {
+                meta == null -> rawProcessName
+                suffix.isBlank() -> meta.label
+                else -> "${meta.label} · $suffix"
+            }
+            val uid = identity.toIntOrNull() ?: -1
+
+            processes += mapOf(
+                "pid" to pid,
+                "uid" to uid,
+                "user" to identity,
+                "packageName" to if (meta == null) baseName else meta.info.packageName,
+                "rawProcessName" to rawProcessName,
+                "processName" to displayName,
+                "appLabel" to (meta?.label ?: rawProcessName),
+                "isSystem" to (meta?.isSystem == true),
+                "isLinux" to isLinux,
+                "isAppProcess" to !isLinux,
+                "isMainProcess" to (meta != null && rawProcessName == meta.info.packageName),
+                "isChildProcess" to (meta != null && rawProcessName.startsWith("${meta.info.packageName}:")),
+            )
+        }
+        return processes
+    }
+
     /**
-     * 判断是否为系统应用
+     * 备用方案：直接遍历 /proc，同时读取 UID 和 cmdline。
      */
-    private fun isSystemApp(packageName: String): Boolean {
-        return packageName.startsWith("com.android.") ||
-                packageName.startsWith("android.") ||
-                packageName == "system" ||
-                packageName == "zygote" ||
-                packageName == "zygote64" ||
-                packageName.startsWith("com.google.android.") ||
-                packageName == "root" ||
-                packageName == "shell"
+    private fun getProcessListFallback(context: Context): List<Map<String, Any>> {
+        val shellCommand = """
+            for d in /proc/[0-9]*; do
+              p=${'$'}{d##*/}
+              c=${'$'}(tr '\0' ' ' < "${'$'}d/cmdline" 2>/dev/null | sed 's/ *${'$'}//')
+              [ -z "${'$'}c" ] && c=${'$'}(cat "${'$'}d/comm" 2>/dev/null)
+              u=${'$'}(awk '/^Uid:/{print ${'$'}2; exit}' "${'$'}d/status" 2>/dev/null)
+              [ -n "${'$'}c" ] && printf '%s %s %s\n' "${'$'}p" "${'$'}u" "${'$'}c"
+            done
+        """.trimIndent()
+        val output = RootManager.executeRootCommand(shellCommand)
+        return parsePsOutput(context, output, hasIdentityColumn = true)
     }
 }
