@@ -28,6 +28,16 @@ object MemoryEngine {
     private var appContext: Context? = null
     private var lastLivenessCheckAt = 0L
     private var lastLivenessResult = false
+    private val regionCategoryLabels = linkedMapOf(
+        "anonymous" to "匿名内存",
+        "heap" to "原生堆",
+        "java" to "Java / Ashmem",
+        "stack" to "线程栈",
+        "app" to "应用代码与数据",
+        "system" to "系统代码与数据",
+        "other" to "其他可写区域",
+    )
+    private var selectedRegionCategories: Set<String> = regionCategoryLabels.keys.toSet()
 
     init {
         try {
@@ -150,12 +160,32 @@ object MemoryEngine {
 
     // ==================== 内存段解析（通过 Root Shell 一次性读取） ====================
 
-    data class MemRegion(val startAddr: Long, val endAddr: Long, val priority: Int)
+    data class MemRegion(
+        val startAddr: Long,
+        val endAddr: Long,
+        val priority: Int,
+        val permissions: String,
+        val name: String,
+        val category: String,
+    )
 
-    private fun getRegions(pid: Int): List<MemRegion> {
+    private fun classifyRegion(name: String): String {
+        val normalized = name.lowercase()
+        return when {
+            normalized.contains("[heap]") -> "heap"
+            normalized.contains("[stack") -> "stack"
+            normalized.contains("/dev/ashmem") || normalized.contains("dalvik") || normalized.contains("/memfd:") -> "java"
+            normalized.isBlank() || normalized.contains("[anon:") -> "anonymous"
+            normalized.contains("/data/") || normalized.contains(".apk") || normalized.contains(".dex") || normalized.contains(".odex") -> "app"
+            normalized.contains("/system/") || normalized.contains("/vendor/") || normalized.contains("/apex/") -> "system"
+            else -> "other"
+        }
+    }
+
+    private fun readRegions(pid: Int, applySelection: Boolean): List<MemRegion> {
         val mapsResult = RootManager.executeRootCommand("cat /proc/$pid/maps 2>/dev/null") ?: return emptyList()
-
         val regions = mutableListOf<MemRegion>()
+
         for (line in mapsResult.lines()) {
             if (line.isBlank()) continue
             val parts = line.split("\\s+".toRegex())
@@ -171,28 +201,81 @@ object MemoryEngine {
 
             if (regionSize <= 0) continue
             if (!permissions.contains('r') || !permissions.contains('w')) continue
-            if (name.contains("/dev/ashmem") || name.contains("[anon:vulkan]")) continue
+            if (name.contains("[anon:vulkan]")) continue
             if (regionSize > 100 * 1024 * 1024) continue
 
-            var priority = 0
-            if (permissions.contains('r')) priority += 10
-            if (permissions.contains('w')) priority += 20
-            when {
-                name.contains("[heap]") -> priority += 70
-                name.contains("[anon:") -> priority += 50
-                name.isEmpty() -> priority += 40
-            }
+            val category = classifyRegion(name)
+            if (applySelection && category !in selectedRegionCategories) continue
 
-            regions.add(MemRegion(startAddr, endAddr, priority))
+            var priority = 30
+            when (category) {
+                "heap" -> priority += 70
+                "anonymous" -> priority += 55
+                "java" -> priority += 50
+                "stack" -> priority += 45
+                "app" -> priority += 40
+                "system" -> priority += 20
+            }
+            if (permissions.contains('x')) priority += 5
+
+            regions.add(MemRegion(startAddr, endAddr, priority, permissions, name, category))
         }
 
-        return regions.sortedByDescending { it.priority }
+        return regions.sortedWith(compareByDescending<MemRegion> { it.priority }.thenBy { it.startAddr })
+    }
+
+    private fun getRegions(pid: Int): List<MemRegion> = readRegions(pid, applySelection = true)
+
+    fun getSelectedRegionCategories(): Set<String> = selectedRegionCategories.toSet()
+
+    fun getRegionCategorySummary(): List<Map<String, Any>> {
+        val pid = attachedPid ?: return regionCategoryLabels.map { (id, label) ->
+            mapOf("id" to id, "label" to label, "count" to 0, "size" to 0L, "selected" to (id in selectedRegionCategories))
+        }
+        val allRegions = readRegions(pid, applySelection = false)
+        return regionCategoryLabels.map { (id, label) ->
+            val categoryRegions = allRegions.filter { it.category == id }
+            mapOf(
+                "id" to id,
+                "label" to label,
+                "count" to categoryRegions.size,
+                "size" to categoryRegions.sumOf { it.endAddr - it.startAddr },
+                "selected" to (id in selectedRegionCategories),
+            )
+        }
+    }
+
+    @Synchronized
+    fun setRegionCategories(categories: Set<String>): Boolean {
+        val valid = categories.filterTo(linkedSetOf()) { it in regionCategoryLabels }
+        if (valid.isEmpty()) return false
+        val previous = selectedRegionCategories
+        selectedRegionCategories = valid
+        val pid = attachedPid
+        if (pid != null) {
+            val filtered = getRegions(pid)
+            if (filtered.isEmpty()) {
+                selectedRegionCategories = previous
+                activeRegions = getRegions(pid)
+                return false
+            }
+            activeRegions = filtered
+            resetSearchState()
+        }
+        return true
     }
 
     fun getMemoryRegions(): List<Map<String, Any>> {
         return activeRegions.map { r ->
-            mapOf("startAddress" to r.startAddr, "endAddress" to r.endAddr,
-                "size" to (r.endAddr - r.startAddr), "priority" to r.priority)
+            mapOf(
+                "startAddress" to r.startAddr,
+                "endAddress" to r.endAddr,
+                "size" to (r.endAddr - r.startAddr),
+                "priority" to r.priority,
+                "permissions" to r.permissions,
+                "name" to r.name,
+                "category" to r.category,
+            )
         }
     }
 

@@ -197,6 +197,26 @@ object LuaEngine {
         }
     }
 
+    private fun parseLuaAddress(value: LuaValue): Long? {
+        if (value.isnumber()) return value.tolong()
+        val raw = value.tojstring().trim()
+        return when {
+            raw.startsWith("0x", ignoreCase = true) -> raw.substring(2).toLongOrNull(16)
+            raw.matches(Regex("[0-9A-Fa-f]{6,}")) -> raw.toLongOrNull(16)
+            else -> raw.toLongOrNull()
+        }
+    }
+
+    private fun luaValueOf(value: Any?): LuaValue {
+        return when (value) {
+            null -> LuaValue.NIL
+            is Float, is Double -> LuaValue.valueOf((value as Number).toDouble())
+            is Number -> LuaValue.valueOf(value.toLong())
+            is Boolean -> LuaValue.valueOf(value)
+            else -> LuaValue.valueOf(value.toString())
+        }
+    }
+
     private fun registerGgApi(gg: LuaTable) {
         // gg.toast
         gg.set("toast", object : OneArgFunction() {
@@ -417,6 +437,129 @@ object LuaEngine {
             }
         })
 
+        // gg.getValues
+        gg.set("getValues", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                if (!arg.istable()) return LuaTable()
+                val input = arg.checktable()
+                val output = LuaTable()
+                var outputIndex = 1
+                for (i in 1..input.length()) {
+                    val source = input.get(i)
+                    if (!source.istable()) continue
+                    val sourceTable = source.checktable()
+                    val address = parseLuaAddress(sourceTable.get("address")) ?: continue
+                    val flagsValue = sourceTable.get("flags")
+                    val type = luaTypeToDataType(if (flagsValue.isnil()) 4 else flagsValue.toint())
+                    val value = MemoryEngine.readMemory(address, type) ?: continue
+                    val item = LuaTable()
+                    item.set("address", LuaValue.valueOf(address))
+                    item.set("flags", LuaValue.valueOf(dataTypeToLuaType(type)))
+                    item.set("value", luaValueOf(value))
+                    item.set("freeze", LuaValue.valueOf(MemoryFreezer.isFrozen(address)))
+                    output.set(outputIndex++, item)
+                }
+                return output
+            }
+        })
+
+        // gg.getListItems
+        gg.set("getListItems", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                val output = LuaTable()
+                val items = MemoryFreezer.getFrozenAddresses()
+                for ((index, source) in items.withIndex()) {
+                    val item = LuaTable()
+                    item.set("address", luaValueOf(source["address"]))
+                    item.set("value", luaValueOf(source["value"]))
+                    item.set("flags", LuaValue.valueOf(dataTypeToLuaType(source["type"] as? String ?: "dword")))
+                    item.set("freeze", LuaValue.TRUE)
+                    output.set(index + 1, item)
+                }
+                return output
+            }
+        })
+
+        // gg.removeListItems
+        gg.set("removeListItems", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                if (!arg.istable()) return LuaValue.valueOf(0)
+                val table = arg.checktable()
+                var count = 0
+                for (i in 1..table.length()) {
+                    val source = table.get(i)
+                    val addressValue = if (source.istable()) source.checktable().get("address") else source
+                    val address = parseLuaAddress(addressValue) ?: continue
+                    if (MemoryFreezer.unfreeze(address)) count++
+                }
+                outputLog.appendLine("🔓 已从保存列表移除 $count 个地址")
+                return LuaValue.valueOf(count)
+            }
+        })
+
+        // gg.getTargetInfo
+        gg.set("getTargetInfo", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                val result = LuaTable()
+                val pid = MemoryEngine.getAttachedPid() ?: 0
+                val prefs = context?.getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
+                result.set("pid", LuaValue.valueOf(pid))
+                result.set("packageName", LuaValue.valueOf(prefs?.getString("attached_package", "") ?: ""))
+                result.set("processName", LuaValue.valueOf(prefs?.getString("attached_name", "") ?: ""))
+                result.set("x64", LuaValue.valueOf(Build.SUPPORTED_64_BIT_ABIS.isNotEmpty()))
+                result.set("cmdLine", LuaValue.valueOf(prefs?.getString("attached_package", "") ?: ""))
+                return result
+            }
+        })
+
+        // gg.getRangesList
+        gg.set("getRangesList", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                val output = LuaTable()
+                val regions = MemoryEngine.getMemoryRegions()
+                for ((index, region) in regions.withIndex()) {
+                    val item = LuaTable()
+                    item.set("start", luaValueOf(region["startAddress"]))
+                    item.set("end", luaValueOf(region["endAddress"]))
+                    item.set("state", luaValueOf(region["permissions"]))
+                    item.set("name", luaValueOf(region["name"]))
+                    item.set("type", luaValueOf(region["category"]))
+                    output.set(index + 1, item)
+                }
+                return output
+            }
+        })
+
+        val regionBits = linkedMapOf(
+            "anonymous" to 1,
+            "heap" to 2,
+            "java" to 4,
+            "stack" to 8,
+            "app" to 16,
+            "system" to 32,
+            "other" to 64,
+        )
+
+        // gg.getRanges / gg.setRanges
+        gg.set("getRanges", object : org.luaj.vm2.lib.ZeroArgFunction() {
+            override fun call(): LuaValue {
+                val selected = MemoryEngine.getSelectedRegionCategories()
+                val mask = regionBits.entries.fold(0) { acc, entry ->
+                    if (entry.key in selected) acc or entry.value else acc
+                }
+                return LuaValue.valueOf(mask)
+            }
+        })
+        gg.set("setRanges", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                val mask = arg.toint()
+                val selected = regionBits.filterValues { bit -> mask and bit != 0 }.keys
+                val success = selected.isNotEmpty() && MemoryEngine.setRegionCategories(selected)
+                if (success) outputLog.appendLine("🧭 已切换内存范围: ${selected.joinToString()}")
+                return LuaValue.valueOf(success)
+            }
+        })
+
         // gg.clearResults
         gg.set("clearResults", object : org.luaj.vm2.lib.ZeroArgFunction() {
             override fun call(): LuaValue { searchResults.clear(); return LuaValue.NIL }
@@ -424,7 +567,12 @@ object LuaEngine {
 
         // gg.clearList
         gg.set("clearList", object : org.luaj.vm2.lib.ZeroArgFunction() {
-            override fun call(): LuaValue { frozenList.clear(); return LuaValue.NIL }
+            override fun call(): LuaValue {
+                frozenList.clear()
+                MemoryFreezer.clearAll()
+                outputLog.appendLine("🔓 已清空保存与冻结列表")
+                return LuaValue.NIL
+            }
         })
 
         // gg.sleep
@@ -442,5 +590,16 @@ object LuaEngine {
         gg.set("TYPE_QWORD", LuaValue.valueOf(8))
         gg.set("TYPE_FLOAT", LuaValue.valueOf(16))
         gg.set("TYPE_DOUBLE", LuaValue.valueOf(32))
+        gg.set("REGION_ANONYMOUS", LuaValue.valueOf(1))
+        gg.set("REGION_C_HEAP", LuaValue.valueOf(2))
+        gg.set("REGION_JAVA_HEAP", LuaValue.valueOf(4))
+        gg.set("REGION_JAVA", LuaValue.valueOf(4))
+        gg.set("REGION_STACK", LuaValue.valueOf(8))
+        gg.set("REGION_CODE_APP", LuaValue.valueOf(16))
+        gg.set("REGION_CODE_SYS", LuaValue.valueOf(32))
+        gg.set("REGION_OTHER", LuaValue.valueOf(64))
+        gg.set("REGION_C_ALLOC", LuaValue.valueOf(1))
+        gg.set("REGION_C_DATA", LuaValue.valueOf(16))
+        gg.set("REGION_C_BSS", LuaValue.valueOf(1))
     }
 }
