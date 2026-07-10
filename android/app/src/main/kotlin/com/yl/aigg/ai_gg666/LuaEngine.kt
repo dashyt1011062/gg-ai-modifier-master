@@ -613,7 +613,7 @@ object LuaEngine {
                 val title = args.arg(1).tojstring()
                 val view = aggViewSpec(args.arg(2)) ?: return LuaValue.valueOf("invalid AGG view")
                 val locked = args.narg() >= 3 && args.arg(3).toboolean()
-                val window = if (args.narg() >= 4) aggWindowSpec(args.arg(4)) else null
+                val window = (if (args.narg() >= 4) aggWindowSpec(args.arg(4)) else null)
                     ?: LuaViewBridge.WindowSpec()
                 window.tabs.add(LuaViewBridge.TabSpec(title, view, locked))
                 window.activeIndex = window.tabs.lastIndex

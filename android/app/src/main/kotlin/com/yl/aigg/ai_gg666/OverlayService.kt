@@ -1094,7 +1094,7 @@ class OverlayService : Service() {
         val topMore = iconView(R.drawable.ic_menu_white_24dp) {
             when (aggMainTab) {
                 0 -> showProcessPanel()
-                1 -> showSearchPanel()
+                1 -> showAggSearchDialog()
                 2 -> showSavedListPanel()
                 3 -> showMemoryEditorPanel()
                 else -> Toast.makeText(this, "断点调试模块将在后续阶段接入", Toast.LENGTH_SHORT).show()
@@ -1142,7 +1142,7 @@ class OverlayService : Service() {
         val toolbarMore = iconView(R.drawable.ic_menu_white_24dp, 45, 12) {
             when (aggMainTab) {
                 0 -> showProcessPanel()
-                1 -> showSearchPanel()
+                1 -> showAggSearchDialog()
                 2 -> showSavedListPanel()
                 3 -> showMemoryEditorPanel()
                 else -> Toast.makeText(this, "暂无断点记录", Toast.LENGTH_SHORT).show()
@@ -1226,8 +1226,9 @@ class OverlayService : Service() {
         }
         mainColumn.addView(statusBar)
 
-        fun toolbarAction(icon: Int, action: () -> Unit) {
-            toolbar.addView(iconView(icon, 48, 12, action), LinearLayout.LayoutParams(dp(48), dp(48)))
+        fun toolbarAction(icon: Int, rotation: Float = 0f, action: () -> Unit) {
+            val view = iconView(icon, 48, 12, action).apply { this.rotation = rotation }
+            toolbar.addView(view, LinearLayout.LayoutParams(dp(48), dp(48)))
         }
 
         fun sectionTitle(parent: LinearLayout, title: String) {
@@ -1567,14 +1568,70 @@ class OverlayService : Service() {
                     infoFilter.text = if (searchResultFilter.isBlank()) "无过滤器" else searchResultFilter
                     valueFormat.visibility = View.VISIBLE
                     foundCount.text = "(${searchResults.size})"
-                    toolbarAction(R.drawable.ic_magnify_white_24dp) { showSearchPanel() }
+                    fun selectedResults(): List<Map<String, Any>> = selectedIndices
+                        .filter { it in searchResults.indices }
+                        .map { searchResults[it] }
+                    toolbarAction(R.drawable.ic_magnify_white_24dp) { showAggSearchDialog() }
                     toolbarAction(R.drawable.ic_agg_select_all) {
-                        selectedIndices.clear()
-                        selectedIndices.addAll(searchResults.indices)
+                        if (selectedIndices.size == searchResults.size && searchResults.isNotEmpty()) selectedIndices.clear()
+                        else {
+                            selectedIndices.clear()
+                            selectedIndices.addAll(searchResults.indices)
+                        }
                         renderTab(1)
                     }
+                    toolbarAction(R.drawable.ic_agg_edit) {
+                        val selected = selectedResults()
+                        when (selected.size) {
+                            0 -> Toast.makeText(this, "请先勾选结果", Toast.LENGTH_SHORT).show()
+                            1 -> {
+                                val item = selected.first()
+                                showWriteDialog(
+                                    item["address"]?.toString() ?: return@toolbarAction,
+                                    item["value"],
+                                    item["machineCode"]?.toString().orEmpty(),
+                                    searchResultType(item),
+                                    returnAction = { showAggSearchTab() },
+                                )
+                            }
+                            else -> showBatchEditDialog(selected)
+                        }
+                    }
+                    toolbarAction(R.drawable.ic_content_save_white_24dp) {
+                        val selected = selectedResults()
+                        if (selected.isEmpty()) Toast.makeText(this, "请先勾选结果", Toast.LENGTH_SHORT).show()
+                        else {
+                            val count = addResultsToSavedList(selected)
+                            Toast.makeText(this, "已保存 $count 条", Toast.LENGTH_SHORT).show()
+                            renderTab(1)
+                        }
+                    }
+                    toolbarAction(R.drawable.ic_agg_lock) {
+                        val selected = selectedResults()
+                        if (selected.isEmpty()) {
+                            Toast.makeText(this, "请先勾选结果", Toast.LENGTH_SHORT).show()
+                        } else {
+                            val unfreeze = selected.all { item ->
+                                (item["addressInt"] as? Number)?.toLong()?.let { MemoryFreezer.isFrozen(it) } == true
+                            }
+                            Thread {
+                                var changed = 0
+                                selected.forEach { item ->
+                                    val address = (item["addressInt"] as? Number)?.toLong() ?: return@forEach
+                                    val type = searchResultType(item)
+                                    val value = item["value"] ?: return@forEach
+                                    val ok = if (unfreeze) MemoryFreezer.unfreeze(address) else MemoryFreezer.freeze(address, value, type)
+                                    if (ok) changed++
+                                }
+                                handler.post {
+                                    Toast.makeText(this@OverlayService, if (unfreeze) "已解冻 $changed 条" else "已冻结 $changed 条", Toast.LENGTH_SHORT).show()
+                                    if (panel === root) renderTab(1)
+                                }
+                            }.start()
+                        }
+                    }
                     toolbarAction(R.drawable.ic_refresh_white_18dp) {
-                        if (searchResults.isEmpty()) showSearchPanel() else {
+                        if (searchResults.isEmpty()) showAggSearchDialog() else {
                             Thread {
                                 val refreshed = searchResults.map { item ->
                                     val address = (item["addressInt"] as? Number)?.toLong()
@@ -1591,14 +1648,20 @@ class OverlayService : Service() {
                         }
                     }
                     renderSearchPage()
-                    statusBar.text = "搜索  ·  ${searchResults.size} 个结果"
+                    statusBar.text = "搜索  ·  ${searchResults.size} 个结果  ·  已选 ${selectedIndices.size}"
                 }
                 2 -> {
-                    val count = loadSavedMemoryItems().size
+                    val savedItems = loadSavedMemoryItems()
+                    val count = savedItems.size
                     infoFilter.text = "保存列表"
                     valueFormat.visibility = View.VISIBLE
                     foundCount.text = "($count)"
-                    toolbarAction(R.drawable.ic_content_save_white_24dp) { showSavedListPanel() }
+                    toolbarAction(R.drawable.ic_agg_lock) { showSavedListPanel() }
+                    toolbarAction(R.drawable.ic_agg_back) { showSavedListImportPanel() }
+                    toolbarAction(R.drawable.ic_agg_copy) {
+                        if (savedItems.isEmpty()) Toast.makeText(this, "保存列表为空", Toast.LENGTH_SHORT).show()
+                        else showSavedListExportPanel(savedItems)
+                    }
                     toolbarAction(R.drawable.ic_refresh_white_18dp) { renderTab(2) }
                     renderSavedPage()
                     statusBar.text = "保存  ·  $count 个地址"
@@ -1607,6 +1670,22 @@ class OverlayService : Service() {
                     infoFilter.text = "0x${memoryEditorAddress.coerceAtLeast(0L).toString(16).uppercase()}"
                     valueFormat.visibility = View.VISIBLE
                     foundCount.text = ""
+                    val pageCount = if (isLandscape) 28 else 18
+                    val pageStep = pageCount.toLong() * MemoryEngine.getTypeSize(memoryEditorType)
+                    toolbarAction(R.drawable.ic_agg_back) {
+                        memoryEditorAddress = (memoryEditorAddress - pageStep).coerceAtLeast(1L)
+                        renderTab(3)
+                    }
+                    toolbarAction(R.drawable.ic_agg_back, 180f) {
+                        memoryEditorAddress += pageStep
+                        renderTab(3)
+                    }
+                    toolbarAction(R.drawable.ic_agg_edit) {
+                        val types = listOf("dword", "float", "double", "word", "byte", "qword")
+                        val next = (types.indexOf(memoryEditorType).coerceAtLeast(0) + 1) % types.size
+                        memoryEditorType = types[next]
+                        renderTab(3)
+                    }
                     toolbarAction(R.drawable.ic_format_list_bulleted_white_24dp) { showMemoryEditorPanel() }
                     toolbarAction(R.drawable.ic_refresh_white_18dp) { renderTab(3) }
                     renderMemoryPage()
@@ -2639,7 +2718,7 @@ class OverlayService : Service() {
 
                     item.setOnClickListener {
                         if (MemoryEngine.getAttachedPid() == pid) {
-                            showSearchPanel()
+                            showAggSearchTab()
                             return@setOnClickListener
                         }
                         status.text = "正在附加 $name…"
@@ -2657,7 +2736,7 @@ class OverlayService : Service() {
                                     savedRangeMax = ""
                                     status.text = "已附加 $name  ·  PID $pid"
                                     status.setTextColor(Color.parseColor("#C8F7DC"))
-                                    showSearchPanel()
+                                    showAggSearchTab()
                                 } else {
                                     clearAttachedProcessInfo()
                                     status.text = "附加失败，请检查 Root 权限和进程状态"
@@ -2912,7 +2991,7 @@ class OverlayService : Service() {
                 memoryEditorAddress += step
                 loadPage()
             }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
-            controls.addView(editorButton("返回搜索", true) { showSearchPanel() }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(2) })
+            controls.addView(editorButton("返回搜索", true) { showAggSearchTab() }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(2) })
             content.addView(controls)
 
             loadPage()
@@ -3725,7 +3804,7 @@ class OverlayService : Service() {
                     }
                 }.start()
             }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
-            actions.addView(savedButton("返回搜索", true) { showSearchPanel() }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(3) })
+            actions.addView(savedButton("返回搜索", true) { showAggSearchTab() }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(3) })
             content.addView(actions)
 
             var clearArmed = false
@@ -3820,6 +3899,261 @@ class OverlayService : Service() {
     // ==================== 搜索面板 ====================
 
     private var currentSearchMode = "exact"
+
+    private fun showAggSearchTab() {
+        aggMainTab = 1
+        showMainMenu()
+    }
+
+    private fun showAggSearchDialog() {
+        val pid = MemoryEngine.getAttachedPid()
+        if (pid == null || !MemoryEngine.isAttachedProcessAlive()) {
+            showProcessPanel()
+            return
+        }
+        saveLastPanel("agg_searcher")
+        makeDraggablePanel("搜索", { content ->
+            content.setPadding(dp(14), dp(12), dp(14), dp(12))
+
+            val status = TextView(this).apply {
+                text = if (searchResults.isEmpty()) "请输入要搜索的数值" else "当前有 ${searchResults.size} 个结果，可继续筛选"
+                setTextColor(Color.parseColor("#F3EDF7"))
+                textSize = 12f
+                setPadding(0, 0, 0, dp(6))
+            }
+            content.addView(status)
+
+            fun label(textValue: String): TextView = TextView(this).apply {
+                text = textValue
+                setTextColor(Color.parseColor("#E6E0E9"))
+                textSize = 10f
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
+            fun input(initial: String = "", hintValue: String = ""): EditText = EditText(this).apply {
+                setText(initial)
+                hint = hintValue
+                setSingleLine(true)
+                textSize = 11f
+                setTextColor(Color.WHITE)
+                setHintTextColor(Color.parseColor("#A9A4AE"))
+                setPadding(dp(8), 0, dp(8), 0)
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(3).toFloat()
+                    setColor(Color.argb(38, 255, 255, 255))
+                    setStroke(dp(1), Color.parseColor("#FFB8B8B8"))
+                }
+            }
+
+            val searchModes = arrayOf("精确", "范围", "地址/AOB")
+            val modeSpinner = Spinner(this).apply {
+                adapter = ArrayAdapter(this@OverlayService, android.R.layout.simple_spinner_item, searchModes).apply {
+                    setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+                }
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(3).toFloat()
+                    setColor(Color.argb(38, 255, 255, 255))
+                    setStroke(dp(1), Color.parseColor("#FFB8B8B8"))
+                }
+            }
+            val valueInput = input(savedSearchInput, "数值、范围或特征码")
+            val valueRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(label("数值"), LinearLayout.LayoutParams(dp(38), dp(48)))
+                addView(modeSpinner, LinearLayout.LayoutParams(dp(82), dp(42)).apply { marginEnd = dp(5) })
+                addView(valueInput, LinearLayout.LayoutParams(0, dp(42), 1f))
+                addView(TextView(this@OverlayService).apply {
+                    text = "HEX"
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.WHITE)
+                    textSize = 9f
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(3).toFloat()
+                        setColor(Color.argb(34, 255, 255, 255))
+                        setStroke(dp(1), Color.parseColor("#FFB8B8B8"))
+                    }
+                    setOnClickListener {
+                        val raw = valueInput.text.toString().trim()
+                        val number = raw.toLongOrNull()
+                        if (number != null) valueInput.setText("0x${number.toString(16).uppercase()}")
+                    }
+                }, LinearLayout.LayoutParams(dp(48), dp(42)).apply { marginStart = dp(5) })
+            }
+            content.addView(valueRow)
+
+            val maskInput = input(savedFilterInput, "AOB 掩码，例如 xx??xx")
+            val maskRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(label("掩码"), LinearLayout.LayoutParams(dp(38), dp(44)))
+                addView(maskInput, LinearLayout.LayoutParams(0, dp(40), 1f))
+            }
+            content.addView(maskRow)
+
+            val types = arrayOf("dword", "float", "double", "word", "byte", "qword")
+            val typeLabels = arrayOf("D: Dword", "F: Float", "E: Double", "W: Word", "B: Byte", "Q: Qword")
+            val typeSpinner = Spinner(this).apply {
+                adapter = ArrayAdapter(this@OverlayService, android.R.layout.simple_spinner_item, typeLabels).apply {
+                    setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+                }
+                setSelection(types.indexOf(searchDataType).coerceAtLeast(0))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(3).toFloat()
+                    setColor(Color.argb(38, 255, 255, 255))
+                    setStroke(dp(1), Color.parseColor("#FFB8B8B8"))
+                }
+            }
+            val typeRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(label("类型"), LinearLayout.LayoutParams(dp(38), dp(44)))
+                addView(typeSpinner, LinearLayout.LayoutParams(0, dp(42), 1f))
+            }
+            content.addView(typeRow)
+
+            val options = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val encrypted = android.widget.CheckBox(this).apply {
+                text = "加密数值"
+                setTextColor(Color.WHITE)
+                textSize = 10f
+                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            }
+            val ordered = android.widget.CheckBox(this).apply {
+                text = "有序组搜"
+                setTextColor(Color.WHITE)
+                textSize = 10f
+                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            }
+            options.addView(encrypted, LinearLayout.LayoutParams(0, dp(44), 1f))
+            options.addView(ordered, LinearLayout.LayoutParams(0, dp(44), 1f))
+            content.addView(options)
+
+            fun dialogButton(textValue: String, action: () -> Unit): TextView = TextView(this).apply {
+                text = textValue
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                textSize = 10f
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(4).toFloat()
+                    setColor(Color.argb(42, 255, 255, 255))
+                    setStroke(dp(1), Color.parseColor("#FFB8B8B8"))
+                }
+                setOnClickListener { action() }
+            }
+
+            fun runSearch(block: () -> List<Map<String, Any>>) {
+                savedSearchInput = valueInput.text.toString()
+                savedFilterInput = maskInput.text.toString()
+                searchDataType = types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]
+                status.text = "正在搜索…"
+                status.setTextColor(Color.WHITE)
+                Thread {
+                    val result = try { block() } catch (_: Exception) { emptyList() }
+                    handler.post {
+                        searchResults = result
+                        selectedIndices.clear()
+                        searchResultPage = 0
+                        Toast.makeText(this@OverlayService, "找到 ${result.size} 个结果", Toast.LENGTH_SHORT).show()
+                        showAggSearchTab()
+                    }
+                }.start()
+            }
+
+            val fuzzyTitle = TextView(this).apply {
+                text = "模糊搜索"
+                setTextColor(Color.parseColor("#FFB8B8B8"))
+                textSize = 9f
+                setPadding(0, dp(4), 0, dp(3))
+            }
+            content.addView(fuzzyTitle)
+
+            val fuzzyRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            fuzzyRow1.addView(dialogButton("数值未变") {
+                runSearch { MemoryEngine.searchFuzzy("unchanged", types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]) }
+            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(3) })
+            fuzzyRow1.addView(dialogButton("数值变化") {
+                runSearch { MemoryEngine.searchFuzzy("changed", types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]) }
+            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3) })
+            content.addView(fuzzyRow1)
+
+            val fuzzyRow2 = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(5), 0, 0)
+            }
+            fuzzyRow2.addView(dialogButton("数值增加") {
+                runSearch { MemoryEngine.searchFuzzy("increased", types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]) }
+            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(3) })
+            fuzzyRow2.addView(dialogButton("数值减少") {
+                runSearch { MemoryEngine.searchFuzzy("decreased", types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]) }
+            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3) })
+            content.addView(fuzzyRow2)
+
+            content.addView(dialogButton("内存范围：${MemoryEngine.getSelectedRegionCategories().joinToString(", ").ifBlank { "全部" }}") {
+                showRegionPanel()
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)).apply { topMargin = dp(6) })
+
+            val footer = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(7), 0, 0)
+            }
+            footer.addView(dialogButton("取消") { showAggSearchTab() }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(3) })
+            footer.addView(dialogButton("更多") { showSearchPanel() }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
+            footer.addView(dialogButton("搜索") {
+                val raw = valueInput.text.toString().trim()
+                val type = types[typeSpinner.selectedItemPosition.coerceIn(types.indices)]
+                if (raw.isBlank()) {
+                    status.text = "请输入搜索内容"
+                    status.setTextColor(Color.parseColor("#FFFF8A80"))
+                    return@dialogButton
+                }
+                when (modeSpinner.selectedItemPosition) {
+                    0 -> {
+                        val parsed: Any? = if (type == "float" || type == "double") raw.toDoubleOrNull() else {
+                            when {
+                                raw.startsWith("0x", true) -> raw.substring(2).toLongOrNull(16)
+                                else -> raw.toLongOrNull()
+                            }
+                        }
+                        if (parsed == null) {
+                            status.text = "数值格式不正确"
+                            status.setTextColor(Color.parseColor("#FFFF8A80"))
+                            return@dialogButton
+                        }
+                        runSearch {
+                            val sameTypeRefine = searchResults.isNotEmpty() && searchDataType == type
+                            if (sameTypeRefine) {
+                                MemoryEngine.filterResults(searchResults.mapNotNull { (it["addressInt"] as? Number)?.toLong() }, parsed, type)
+                            } else {
+                                MemoryEngine.searchExact(parsed, type)
+                            }
+                        }
+                    }
+                    1 -> {
+                        val parts = raw.split('~', ';', ',', '～').map { it.trim() }.filter { it.isNotBlank() }
+                        if (parts.size < 2) {
+                            status.text = "范围格式示例：1~100"
+                            status.setTextColor(Color.parseColor("#FFFF8A80"))
+                            return@dialogButton
+                        }
+                        val min = parts[0].toDoubleOrNull()
+                        val max = parts[1].toDoubleOrNull()
+                        if (min == null || max == null) {
+                            status.text = "范围数值格式不正确"
+                            status.setTextColor(Color.parseColor("#FFFF8A80"))
+                            return@dialogButton
+                        }
+                        runSearch { MemoryEngine.searchByRange(min, max, type) }
+                    }
+                    else -> runSearch { MemoryEngine.searchAob(raw, maskInput.text.toString().takeIf { it.isNotBlank() }) }
+                }
+            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3) })
+            content.addView(footer)
+        }, 390, 540, onBack = { showAggSearchTab() }, titleIcon = R.drawable.ic_magnify_white_24dp, bgColor = "#C0000000")
+    }
 
     private fun showSearchPanel() {
         saveLastPanel("search")
@@ -4216,12 +4550,12 @@ class OverlayService : Service() {
                             if (ok) "已应用 ${selected.size} 类内存范围" else "范围应用失败",
                             Toast.LENGTH_SHORT,
                         ).show()
-                        if (ok) showSearchPanel()
+                        if (ok) showAggSearchDialog()
                     }
                 }.start()
             }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(3) })
             content.addView(actions)
-        }, 370, 520, onBack = { showSearchPanel() }, titleIcon = R.drawable.ic_agg_memory)
+        }, 370, 520, onBack = { showAggSearchDialog() }, titleIcon = R.drawable.ic_agg_memory)
     }
 
     private fun refreshSearchValues() {
@@ -5586,7 +5920,7 @@ class OverlayService : Service() {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(0, dp(7), 0, 0)
             }
-            actions.addView(button("取消") { showSearchPanel() }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(4) })
+            actions.addView(button("取消") { showAggSearchTab() }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(4) })
             actions.addView(button("开始搜索", true) {
                 val offset = parseLongValue(maxOffset.text.toString(), 0x400L)
                 val from = parseLongValue(memoryFrom.text.toString(), 0L)
@@ -5608,12 +5942,12 @@ class OverlayService : Service() {
                         searchResultPage = 0
                         focusedSearchResultIndex = -1
                         Toast.makeText(this@OverlayService, "找到 ${pointers.size} 个指针", Toast.LENGTH_SHORT).show()
-                        showSearchPanel()
+                        showAggSearchTab()
                     }
                 }.start()
             }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(4) })
             content.addView(actions)
-        }, 390, 390, onBack = { showSearchPanel() }, titleIcon = R.drawable.ic_agg_memory)
+        }, 390, 390, onBack = { showAggSearchTab() }, titleIcon = R.drawable.ic_agg_memory)
     }
 
     private fun showSearchResultCopyPanel(results: List<Map<String, Any>>) {
@@ -5637,7 +5971,7 @@ class OverlayService : Service() {
                     setOnClickListener {
                         copyToClipboard(results.joinToString("\n") { valueBuilder(it) })
                         Toast.makeText(this@OverlayService, "已复制 $label", Toast.LENGTH_SHORT).show()
-                        showSearchPanel()
+                        showAggSearchTab()
                     }
                 }
             }
@@ -5649,7 +5983,7 @@ class OverlayService : Service() {
                 val address = item["address"]?.toString() ?: ""
                 "$address  [${searchResultType(item).uppercase()}]  = ${item["value"]}  ${item["machineCode"] ?: ""}"
             }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)))
-        }, 320, 270, onBack = { showSearchPanel() }, titleIcon = R.drawable.ic_agg_copy)
+        }, 320, 270, onBack = { showAggSearchTab() }, titleIcon = R.drawable.ic_agg_copy)
     }
 
     private fun showSearchResultActions(index: Int, result: Map<String, Any>) {
@@ -5704,7 +6038,7 @@ class OverlayService : Service() {
                 setPadding(0, dp(6), 0, 0)
             }
             row1.addView(itemAction("修改值") {
-                showWriteDialog(addressText, value, machineCode, type, returnAction = { showSearchPanel() })
+                showWriteDialog(addressText, value, machineCode, type, returnAction = { showAggSearchTab() })
             }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginEnd = dp(3) })
             row1.addView(itemAction("地址跳转") {
                 memoryEditorAddress = address
@@ -5720,7 +6054,7 @@ class OverlayService : Service() {
             row2.addView(itemAction("保存到列表") {
                 val count = addResultsToSavedList(listOf(result))
                 Toast.makeText(this@OverlayService, "已保存 $count 条", Toast.LENGTH_SHORT).show()
-                showSearchPanel()
+                showAggSearchTab()
             }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginEnd = dp(3) })
             row2.addView(itemAction(if (frozen) "解除冻结" else "冻结") {
                 Thread {
@@ -5728,7 +6062,7 @@ class OverlayService : Service() {
                     else value != null && MemoryFreezer.freeze(address, value, type)
                     handler.post {
                         Toast.makeText(this@OverlayService, if (success) "操作成功" else "操作失败", Toast.LENGTH_SHORT).show()
-                        showSearchPanel()
+                        showAggSearchTab()
                     }
                 }.start()
             }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(3) })
@@ -5750,7 +6084,7 @@ class OverlayService : Service() {
             }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(38)).apply { topMargin = dp(6) })
         }, 340, 390, onBack = {
             focusedSearchResultIndex = index
-            showSearchPanel()
+            showAggSearchTab()
         }, titleIcon = R.drawable.ic_agg_memory)
     }
 
