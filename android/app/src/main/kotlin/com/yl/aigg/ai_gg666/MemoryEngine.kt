@@ -681,6 +681,107 @@ object MemoryEngine {
         }
     }
 
+    fun searchPointers(
+        targetAddresses: List<Long>,
+        maxOffset: Long,
+        memoryFrom: Long = 0L,
+        memoryTo: Long = -1L,
+        limit: Int = 0,
+    ): List<Map<String, Any>> {
+        val pid = attachedPid ?: return emptyList()
+        if (!isAttachedProcessAlive() || maxOffset < 0L) return emptyList()
+        val targets = targetAddresses.filter { it > 0L }.distinct().sorted().take(128)
+        if (targets.isEmpty()) return emptyList()
+        val safeLimit = if (limit <= 0) MAX_RESULTS else limit.coerceIn(1, 5000)
+        val upperBound = if (memoryTo <= 0L) Long.MAX_VALUE else memoryTo
+        if (upperBound <= memoryFrom) return emptyList()
+
+        val regions = activeRegions.mapNotNull { region ->
+            val start = maxOf(region.startAddr, memoryFrom)
+            val end = minOf(region.endAddr, upperBound)
+            if (end <= start) null else region.copy(startAddr = start, endAddr = end)
+        }
+        if (regions.isEmpty()) return emptyList()
+
+        val intervals = mutableListOf<Pair<Long, Long>>()
+        for (target in targets) {
+            val low = (target - maxOffset).coerceAtLeast(0L)
+            val high = target
+            val last = intervals.lastOrNull()
+            if (last != null && low <= last.second + 1L) {
+                intervals[intervals.lastIndex] = last.first to maxOf(last.second, high)
+            } else {
+                intervals.add(low to high)
+            }
+        }
+
+        val pointerTypes = if (targets.any { it > 0xFFFF_FFFFL }) listOf("qword") else listOf("dword", "qword")
+        val candidates = linkedMapOf<String, Pair<Long, String>>()
+        try {
+            runBlocking {
+                loop@ for ((low, high) in intervals) {
+                    for (type in pointerTypes) {
+                        val typeLow: Number
+                        val typeHigh: Number
+                        if (type == "dword") {
+                            if (low > 0xFFFF_FFFFL) continue
+                            typeLow = low.coerceAtMost(0xFFFF_FFFFL)
+                            typeHigh = high.coerceAtMost(0xFFFF_FFFFL)
+                        } else {
+                            typeLow = low
+                            typeHigh = high
+                        }
+                        val addresses = RootScanner.searchRange(
+                            pid = pid,
+                            regions = regions,
+                            type = type,
+                            typeSize = getTypeSize(type),
+                            lowBound = typeLow,
+                            highBound = typeHigh,
+                        )
+                        for (address in addresses) {
+                            candidates.putIfAbsent("$type:$address", address to type)
+                            if (candidates.size >= safeLimit * 4) break@loop
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "searchPointers scan failed: ${e.message}")
+            return emptyList()
+        }
+
+        val output = mutableListOf<Map<String, Any>>()
+        for ((candidateAddress, type) in candidates.values) {
+            val raw = readMemory(candidateAddress, type) as? Number ?: continue
+            val pointerValue = if (type == "dword") raw.toLong() and 0xFFFF_FFFFL else raw.toLong()
+            val target = targets.firstOrNull { it >= pointerValue && it - pointerValue <= maxOffset } ?: continue
+            val offset = target - pointerValue
+            val machineCode = readBytes(candidateAddress, getTypeSize(type))
+                ?.joinToString(" ") { String.format("%02X", it) }
+                .orEmpty()
+            output.add(
+                mapOf(
+                    "address" to "0x${candidateAddress.toString(16).uppercase()}",
+                    "addressInt" to candidateAddress,
+                    "value" to pointerValue,
+                    "type" to type,
+                    "pointerTarget" to target,
+                    "pointerTargetText" to "0x${target.toString(16).uppercase()}",
+                    "pointerOffset" to offset,
+                    "pointerExpression" to "0x${pointerValue.toString(16).uppercase()} + 0x${offset.toString(16).uppercase()}",
+                    "machineCode" to machineCode,
+                    "isFavorite" to false,
+                    "isFrozen" to MemoryFreezer.isFrozen(candidateAddress),
+                )
+            )
+            if (output.size >= safeLimit) break
+        }
+        return output.sortedWith(compareBy<Map<String, Any>> {
+            (it["pointerOffset"] as? Number)?.toLong() ?: Long.MAX_VALUE
+        }.thenBy { (it["addressInt"] as? Number)?.toLong() ?: Long.MAX_VALUE })
+    }
+
     private fun searchAllValues(type: String): List<Map<String, Any>> {
         val pid = attachedPid ?: return emptyList()
         if (activeRegions.isEmpty()) return emptyList()

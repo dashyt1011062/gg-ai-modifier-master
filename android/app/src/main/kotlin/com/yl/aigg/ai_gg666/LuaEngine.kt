@@ -832,6 +832,26 @@ object LuaEngine {
             }
         })
 
+        // gg.searchPointer
+        gg.set("searchPointer", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                if (searchResults.isEmpty()) return LuaValue.valueOf("no search results")
+                val maxOffset = args.arg(1).tolong().coerceAtLeast(0L)
+                val memoryFrom = if (args.narg() >= 2 && !args.arg(2).isnil()) args.arg(2).tolong() else 0L
+                val memoryTo = if (args.narg() >= 3 && !args.arg(3).isnil()) args.arg(3).tolong() else -1L
+                val limit = if (args.narg() >= 4 && !args.arg(4).isnil()) args.arg(4).toint() else 0
+                val targets = searchResults.mapNotNull { source ->
+                    (source["addressInt"] as? Number)?.toLong()
+                        ?: source["address"]?.toString()?.removePrefix("0x")?.removePrefix("0X")?.toLongOrNull(16)
+                }
+                val pointers = MemoryEngine.searchPointers(targets, maxOffset, memoryFrom, memoryTo, limit)
+                searchResults.clear()
+                searchResults.addAll(pointers)
+                outputLog.appendLine("🧷 指针搜索完成：${pointers.size} 条，最大偏移 0x${maxOffset.toString(16).uppercase()}")
+                return LuaValue.TRUE
+            }
+        })
+
         // gg.processPause / gg.processResume / gg.isProcessPaused
         gg.set("processPause", object : org.luaj.vm2.lib.ZeroArgFunction() {
             override fun call(): LuaValue {
@@ -1013,6 +1033,11 @@ object LuaEngine {
         gg.set("LOAD_APPEND", LuaValue.valueOf(1))
         gg.set("LOAD_VALUES", LuaValue.valueOf(2))
         gg.set("LOAD_VALUES_FREEZE", LuaValue.valueOf(4))
+        gg.set("POINTER_NO", LuaValue.valueOf(0))
+        gg.set("POINTER_READ_ONLY", LuaValue.valueOf(1))
+        gg.set("POINTER_WRITABLE", LuaValue.valueOf(2))
+        gg.set("POINTER_EXECUTABLE", LuaValue.valueOf(4))
+        gg.set("POINTER_EXECUTABLE_WRITABLE", LuaValue.valueOf(6))
         gg.set("REGION_ANONYMOUS", LuaValue.valueOf(1))
         gg.set("REGION_C_HEAP", LuaValue.valueOf(2))
         gg.set("REGION_JAVA_HEAP", LuaValue.valueOf(4))

@@ -4297,6 +4297,10 @@ class OverlayService : Service() {
                 append(item["type"] ?: "")
                 append(' ')
                 append(item["machineCode"] ?: "")
+                append(' ')
+                append(item["pointerTargetText"] ?: "")
+                append(' ')
+                append(item["pointerExpression"] ?: "")
             }.lowercase()
             searchable.contains(keyword)
         }
@@ -4448,6 +4452,7 @@ class OverlayService : Service() {
                 addAction(compactButton("刷新") { refreshSearchValues() })
                 addAction(compactButton("保存列表") { showSavedListPanel() })
                 addAction(compactButton("内存范围") { showRegionPanel() })
+                addAction(compactButton("指针搜索") { showPointerSearchPanel(results) })
             } else {
                 addAction(compactButton("保存到列表", accent = true) {
                     val count = addResultsToSavedList(chosen)
@@ -4470,6 +4475,7 @@ class OverlayService : Service() {
                     }
                 })
                 addAction(compactButton("冻结/解冻") { toggleSelectedFreeze(results, rl, actionBarContainer) })
+                addAction(compactButton("指针") { showPointerSearchPanel(chosen) })
                 addAction(compactButton("AI") {
                     addResultsToAIChat(chosen)
                     Toast.makeText(this, "已添加 ${chosen.size} 条到 AI", Toast.LENGTH_SHORT).show()
@@ -4615,7 +4621,11 @@ class OverlayService : Service() {
                 gravity = Gravity.CENTER_VERTICAL or Gravity.END
             }
             val valueView = TextView(this).apply {
-                text = value?.toString() ?: "?"
+                text = if (result["pointerTarget"] != null && value is Number) {
+                    "0x${value.toLong().toString(16).uppercase()}"
+                } else {
+                    value?.toString() ?: "?"
+                }
                 textSize = 11f
                 typeface = android.graphics.Typeface.MONOSPACE
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -4627,6 +4637,8 @@ class OverlayService : Service() {
             valueColumn.addView(TextView(this).apply {
                 text = buildString {
                     append(resultType.uppercase())
+                    val pointerOffset = (result["pointerOffset"] as? Number)?.toLong()
+                    if (pointerOffset != null) append(" +0x${pointerOffset.toString(16).uppercase()}")
                     if (frozen) append("  🔒")
                 }
                 setTextColor(if (frozen) Color.parseColor("#D0BCFF") else Color.parseColor("#938F99"))
@@ -4734,6 +4746,11 @@ class OverlayService : Service() {
     }
 
     private fun formatSearchResultInterpretations(result: Map<String, Any>): String {
+        val pointerExpression = result["pointerExpression"]?.toString().orEmpty()
+        val pointerTarget = result["pointerTargetText"]?.toString().orEmpty()
+        if (pointerExpression.isNotEmpty()) {
+            return "PTR $pointerExpression → $pointerTarget"
+        }
         val machineCode = result["machineCode"]?.toString().orEmpty()
         val bytes = machineCode.split(Regex("\\s+"))
             .mapNotNull { token -> token.takeIf { it.length == 2 }?.toIntOrNull(16)?.toByte() }
@@ -4748,6 +4765,118 @@ class OverlayService : Service() {
         val floatValue = buffer.getFloat(0)
         val qwordValue = buffer.getLong(0)
         return "B:$byteValue  W:$wordValue  D:$dwordValue  F:${String.format(java.util.Locale.US, "%.4g", floatValue)}  Q:$qwordValue"
+    }
+
+    private fun showPointerSearchPanel(targetResults: List<Map<String, Any>>) {
+        val targets = targetResults.map { searchResultAddress(it) }.filter { it > 0L }.distinct()
+        if (targets.isEmpty()) {
+            Toast.makeText(this, "没有有效的目标地址", Toast.LENGTH_SHORT).show()
+            return
+        }
+        makeDraggablePanel("指针搜索 · ${targets.size} 个目标", { content ->
+            content.addView(TextView(this).apply {
+                text = "查找满足“指针值 + 偏移 = 目标地址”的 DWORD/QWORD 地址"
+                setTextColor(Color.parseColor("#CAC4D0"))
+                textSize = 9.5f
+                setPadding(dp(5), dp(2), dp(5), dp(6))
+            })
+
+            fun pointerInput(hintText: String, initial: String = ""): EditText {
+                return EditText(this).apply {
+                    hint = hintText
+                    setText(initial)
+                    setSingleLine(true)
+                    textSize = 10.5f
+                    setTextColor(Color.parseColor("#F3EDF7"))
+                    setHintTextColor(Color.parseColor("#938F99"))
+                    inputType = android.text.InputType.TYPE_CLASS_TEXT
+                    setPadding(dp(10), 0, dp(10), 0)
+                    background = aggMenuDrawable(Color.parseColor("#25222B"), 8, Color.parseColor("#49454F"))
+                }
+            }
+
+            fun parseLongValue(rawText: String, blankValue: Long): Long? {
+                val raw = rawText.trim()
+                if (raw.isEmpty()) return blankValue
+                return when {
+                    raw.startsWith("0x", ignoreCase = true) -> raw.substring(2).toLongOrNull(16)
+                    raw.endsWith("h", ignoreCase = true) -> raw.dropLast(1).toLongOrNull(16)
+                    raw.any { it in 'A'..'F' || it in 'a'..'f' } -> raw.toLongOrNull(16)
+                    else -> raw.toLongOrNull()
+                }
+            }
+
+            val maxOffset = pointerInput("最大偏移，例如 0x400", "0x400")
+            content.addView(maxOffset, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)))
+            val rangeRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(6), 0, 0)
+            }
+            val memoryFrom = pointerInput("扫描起始地址（留空=全部）")
+            val memoryTo = pointerInput("扫描结束地址（留空=全部）")
+            rangeRow.addView(memoryFrom, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(3) })
+            rangeRow.addView(memoryTo, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(3) })
+            content.addView(rangeRow)
+            val limitInput = pointerInput("结果上限（默认 500）", "500")
+            content.addView(limitInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)).apply { topMargin = dp(6) })
+
+            val preview = targets.take(4).joinToString("  ") { "0x${it.toString(16).uppercase()}" }
+            val state = TextView(this).apply {
+                text = "目标：$preview${if (targets.size > 4) " …" else ""}"
+                setTextColor(Color.parseColor("#938F99"))
+                textSize = 8.8f
+                maxLines = 3
+                setPadding(dp(5), dp(7), dp(5), dp(3))
+            }
+            content.addView(state)
+
+            fun button(label: String, accent: Boolean = false, action: () -> Unit): TextView {
+                return TextView(this).apply {
+                    text = label
+                    gravity = Gravity.CENTER
+                    textSize = 10f
+                    setTextColor(if (accent) Color.parseColor("#231A2E") else Color.parseColor("#E6E0E9"))
+                    setTypeface(null, if (accent) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                    background = aggMenuDrawable(
+                        if (accent) Color.parseColor("#D0BCFF") else Color.parseColor("#302D35"),
+                        9,
+                        if (accent) Color.parseColor("#E8DEF8") else Color.parseColor("#49454F"),
+                    )
+                    setOnClickListener { action() }
+                }
+            }
+            val actions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(7), 0, 0)
+            }
+            actions.addView(button("取消") { showSearchPanel() }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(4) })
+            actions.addView(button("开始搜索", true) {
+                val offset = parseLongValue(maxOffset.text.toString(), 0x400L)
+                val from = parseLongValue(memoryFrom.text.toString(), 0L)
+                val to = parseLongValue(memoryTo.text.toString(), -1L)
+                val limit = limitInput.text.toString().trim().toIntOrNull() ?: 500
+                if (offset == null || offset < 0L || from == null || to == null || (to > 0L && to <= from)) {
+                    state.text = "参数无效，请检查偏移和地址范围"
+                    state.setTextColor(Color.parseColor("#FFB4AB"))
+                    return@button
+                }
+                state.text = "正在扫描指针候选…"
+                state.setTextColor(Color.parseColor("#D0BCFF"))
+                Thread {
+                    val pointers = MemoryEngine.searchPointers(targets, offset, from, to, limit)
+                    handler.post {
+                        searchResults = pointers
+                        selectedIndices.clear()
+                        searchResultFilter = ""
+                        searchResultPage = 0
+                        focusedSearchResultIndex = -1
+                        Toast.makeText(this@OverlayService, "找到 ${pointers.size} 个指针", Toast.LENGTH_SHORT).show()
+                        showSearchPanel()
+                    }
+                }.start()
+            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(4) })
+            content.addView(actions)
+        }, 390, 390, onBack = { showSearchPanel() }, titleIcon = R.drawable.ic_agg_memory)
     }
 
     private fun showSearchResultCopyPanel(results: List<Map<String, Any>>) {
@@ -4878,7 +5007,11 @@ class OverlayService : Service() {
                 showAIChatPanel()
             }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(3) })
             content.addView(row3)
-        }, 340, 340, onBack = {
+
+            content.addView(itemAction("查找指向此地址的指针") {
+                showPointerSearchPanel(listOf(result))
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(38)).apply { topMargin = dp(6) })
+        }, 340, 390, onBack = {
             focusedSearchResultIndex = index
             showSearchPanel()
         }, titleIcon = R.drawable.ic_agg_memory)
