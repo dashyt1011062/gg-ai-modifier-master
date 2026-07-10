@@ -65,6 +65,8 @@ class OverlayService : Service() {
     private var savedRangeMin = ""
     private var savedRangeMax = ""
     private var savedScrollY = 0
+    private var memoryEditorAddress = 0L
+    private var memoryEditorType = "dword"
 
     private data class SavedMemoryItem(
         val address: Long,
@@ -437,6 +439,7 @@ class OverlayService : Service() {
         when (lastPanel) {
             "process" -> showProcessPanel()
             "search" -> showSearchPanel()
+            "editor" -> showMemoryEditorPanel()
             "saved" -> showSavedListPanel()
             "chat" -> showAIChatPanel()
             "script" -> showScriptPanel()
@@ -836,7 +839,7 @@ class OverlayService : Service() {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
-        row1.addView(toolCard(R.drawable.ic_agg_apps, "进程列表", "查看并切换目标进程", "#D0BCFF") { showProcessPanel() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginEnd = dp(3) })
+        row1.addView(toolCard(R.drawable.ic_agg_edit, "内存编辑器", "跳转地址并连续浏览附近内存", "#D0BCFF") { showMemoryEditorPanel() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginEnd = dp(3) })
         row1.addView(toolCard(R.drawable.ic_agg_memory, "内存搜索", "精确、模糊、范围和特征码", "#A9C7FF") { showSearchPanel() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginStart = dp(3) })
         workspace.addView(row1)
 
@@ -1578,6 +1581,226 @@ class OverlayService : Service() {
         } catch (_: Exception) {}
     }
 
+    private fun showMemoryEditorPanel(
+        initialAddress: Long = memoryEditorAddress,
+        initialType: String = memoryEditorType,
+    ) {
+        val attachedPid = MemoryEngine.getAttachedPid()
+        if (attachedPid == null || !MemoryEngine.isAttachedProcessAlive()) {
+            showProcessPanel()
+            return
+        }
+
+        if (initialAddress > 0L) memoryEditorAddress = initialAddress
+        if (MemoryEngine.isSupportedType(initialType)) memoryEditorType = initialType
+        if (memoryEditorAddress <= 0L) {
+            memoryEditorAddress = (MemoryEngine.getMemoryRegions().firstOrNull()?.get("startAddress") as? Number)?.toLong() ?: 1L
+        }
+        saveLastPanel("editor")
+
+        makeDraggablePanel("内存编辑器", { content ->
+            val pageItems = 36
+            val types = arrayOf("dword", "float", "double", "byte", "word", "qword")
+            val addressInput = EditText(this).apply {
+                setText("0x${memoryEditorAddress.toString(16).uppercase()}")
+                hint = "输入十六进制地址"
+                setTextColor(Color.parseColor("#F3EDF7"))
+                setHintTextColor(Color.parseColor("#938F99"))
+                textSize = 11.5f
+                setSingleLine(true)
+                inputType = android.text.InputType.TYPE_CLASS_TEXT
+                setPadding(dp(11), 0, dp(10), 0)
+                background = aggMenuDrawable(Color.parseColor("#25222B"), 9, Color.parseColor("#49454F"))
+            }
+            val typeAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, types).apply {
+                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+            val typeSpinner = Spinner(this).apply {
+                adapter = typeAdapter
+                setSelection(types.indexOf(memoryEditorType).coerceAtLeast(0))
+                background = aggMenuDrawable(Color.parseColor("#34313A"), 9, Color.parseColor("#49454F"))
+            }
+            val jumpButton = TextView(this).apply {
+                text = "跳转"
+                gravity = Gravity.CENTER
+                setTextColor(Color.parseColor("#231A2E"))
+                textSize = 10f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                background = aggMenuDrawable(Color.parseColor("#D0BCFF"), 9, Color.parseColor("#E8DEF8"))
+            }
+            val addressRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(addressInput, LinearLayout.LayoutParams(0, dp(40), 1f))
+                addView(typeSpinner, LinearLayout.LayoutParams(dp(78), dp(40)).apply { marginStart = dp(5) })
+                addView(jumpButton, LinearLayout.LayoutParams(dp(58), dp(40)).apply { marginStart = dp(5) })
+            }
+            content.addView(addressRow)
+
+            val status = TextView(this).apply {
+                text = "正在读取内存…"
+                setTextColor(Color.parseColor("#CAC4D0"))
+                textSize = 9.5f
+                setPadding(dp(4), dp(5), dp(4), dp(5))
+            }
+            content.addView(status)
+
+            val list = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            val scroll = ScrollView(this).apply {
+                isFillViewport = true
+                addView(list)
+            }
+            content.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+            fun parseEditorAddress(raw: String): Long? {
+                val text = raw.trim()
+                return when {
+                    text.startsWith("0x", ignoreCase = true) -> text.substring(2).toLongOrNull(16)
+                    text.matches(Regex("[0-9A-Fa-f]{6,}")) -> text.toLongOrNull(16)
+                    else -> text.toLongOrNull()
+                }
+            }
+
+            fun renderRows(rows: List<Map<String, Any>>) {
+                list.removeAllViews()
+                if (rows.isEmpty()) {
+                    list.addView(TextView(this).apply {
+                        text = "该地址不可读或已离开有效内存区域"
+                        gravity = Gravity.CENTER
+                        setTextColor(Color.parseColor("#FFB4AB"))
+                        textSize = 11f
+                        setPadding(dp(8), dp(42), dp(8), dp(42))
+                    })
+                    status.text = "读取失败"
+                    status.setTextColor(Color.parseColor("#FFB4AB"))
+                    return
+                }
+                status.text = "${rows.first()["address"]} — ${rows.last()["address"]}  ·  ${rows.size} 项"
+                status.setTextColor(Color.parseColor("#C8F7DC"))
+                for ((index, item) in rows.withIndex()) {
+                    val address = (item["addressInt"] as Number).toLong()
+                    val addressText = item["address"] as String
+                    val value = item["value"]
+                    val rawBytes = item["machineCode"] as? String ?: ""
+                    val frozen = MemoryFreezer.isFrozen(address)
+                    val row = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(7), dp(5), dp(7), dp(5))
+                        background = aggMenuDrawable(
+                            if (frozen) Color.parseColor("#332B3D") else if (index % 2 == 0) Color.parseColor("#25222B") else Color.parseColor("#211F26"),
+                            7,
+                            if (frozen) Color.parseColor("#B69DF8") else Color.parseColor("#343039"),
+                        )
+                        layoutParams = LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            dp(42),
+                        ).apply { bottomMargin = dp(2) }
+                        setOnClickListener {
+                            showWriteDialog(
+                                addressText,
+                                value,
+                                rawBytes,
+                                memoryEditorType,
+                                returnAction = { showMemoryEditorPanel(address, memoryEditorType) },
+                            )
+                        }
+                        setOnLongClickListener {
+                            copyToClipboard(addressText)
+                            Toast.makeText(this@OverlayService, "已复制 $addressText", Toast.LENGTH_SHORT).show()
+                            true
+                        }
+                    }
+                    row.addView(TextView(this).apply {
+                        text = addressText
+                        setTextColor(Color.parseColor("#D0BCFF"))
+                        textSize = 9.5f
+                        typeface = android.graphics.Typeface.MONOSPACE
+                        maxLines = 1
+                    }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.15f))
+                    row.addView(TextView(this).apply {
+                        text = value.toString()
+                        setTextColor(if (frozen) Color.parseColor("#C8F7DC") else Color.parseColor("#F3EDF7"))
+                        textSize = 10.5f
+                        setTypeface(null, android.graphics.Typeface.BOLD)
+                        gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                        maxLines = 1
+                    }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.8f))
+                    row.addView(TextView(this).apply {
+                        text = rawBytes
+                        setTextColor(Color.parseColor("#938F99"))
+                        textSize = 8.5f
+                        typeface = android.graphics.Typeface.MONOSPACE
+                        gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                        maxLines = 1
+                    }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(8) })
+                    list.addView(row)
+                }
+            }
+
+            fun loadPage() {
+                addressInput.setText("0x${memoryEditorAddress.toString(16).uppercase()}")
+                status.text = "正在读取 ${memoryEditorType.uppercase()} 数据…"
+                status.setTextColor(Color.parseColor("#D0BCFF"))
+                list.removeAllViews()
+                Thread {
+                    val rows = MemoryEngine.readMemoryWindow(memoryEditorAddress, pageItems, memoryEditorType)
+                    handler.post { renderRows(rows) }
+                }.start()
+            }
+
+            jumpButton.setOnClickListener {
+                val parsed = parseEditorAddress(addressInput.text.toString())
+                val selectedType = typeSpinner.selectedItem.toString()
+                if (parsed == null || parsed <= 0L) {
+                    status.text = "地址格式不正确"
+                    status.setTextColor(Color.parseColor("#FFB4AB"))
+                } else {
+                    memoryEditorAddress = parsed
+                    memoryEditorType = selectedType
+                    loadPage()
+                }
+            }
+
+            val controls = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(6), 0, 0)
+            }
+            fun editorButton(label: String, accent: Boolean = false, action: () -> Unit): TextView {
+                return TextView(this).apply {
+                    text = label
+                    gravity = Gravity.CENTER
+                    textSize = 9.5f
+                    setTextColor(if (accent) Color.parseColor("#231A2E") else Color.parseColor("#E6E0E9"))
+                    setTypeface(null, if (accent) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                    background = aggMenuDrawable(
+                        if (accent) Color.parseColor("#D0BCFF") else Color.parseColor("#302D35"),
+                        9,
+                        if (accent) Color.parseColor("#E8DEF8") else Color.parseColor("#49454F"),
+                    )
+                    setOnClickListener { action() }
+                }
+            }
+            controls.addView(editorButton("上一页") {
+                val step = pageItems.toLong() * MemoryEngine.getTypeSize(memoryEditorType)
+                memoryEditorAddress = (memoryEditorAddress - step).coerceAtLeast(1L)
+                loadPage()
+            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginEnd = dp(2) })
+            controls.addView(editorButton("刷新") { loadPage() }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
+            controls.addView(editorButton("下一页") {
+                val step = pageItems.toLong() * MemoryEngine.getTypeSize(memoryEditorType)
+                memoryEditorAddress += step
+                loadPage()
+            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
+            controls.addView(editorButton("返回搜索", true) { showSearchPanel() }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(2) })
+            content.addView(controls)
+
+            loadPage()
+        }, 410, 590, onBack = { showMainMenu() }, titleIcon = R.drawable.ic_agg_edit)
+    }
+
     private fun savedItemKey(item: SavedMemoryItem): String =
         "${item.packageName}:${item.address}:${item.type}"
 
@@ -1762,8 +1985,16 @@ class OverlayService : Service() {
                             LinearLayout.LayoutParams.WRAP_CONTENT,
                         ).apply { bottomMargin = dp(4) }
                         setOnClickListener {
-                            if (canOperate) showWriteDialog(addressText, liveValue, dataType = item.type)
-                            else Toast.makeText(this@OverlayService, "请先附加对应进程", Toast.LENGTH_SHORT).show()
+                            if (canOperate) {
+                                showWriteDialog(
+                                    addressText,
+                                    liveValue,
+                                    dataType = item.type,
+                                    returnAction = { showSavedListPanel() },
+                                )
+                            } else {
+                                Toast.makeText(this@OverlayService, "请先附加对应进程", Toast.LENGTH_SHORT).show()
+                            }
                         }
                         setOnLongClickListener {
                             showRenameSavedItemPanel(item)
@@ -3361,6 +3592,11 @@ class OverlayService : Service() {
                 savedScrollY = sv?.scrollY ?: 0
                 showWriteDialog(addr, v, mc, resultType)
             }, LinearLayout.LayoutParams(dp(54), dp(44)).apply { marginEnd = dp(6) })
+            opLine.addView(iconBtn(R.drawable.ic_agg_memory, "浏览") {
+                memoryEditorAddress = addressLong
+                memoryEditorType = resultType
+                showMemoryEditorPanel(addressLong, resultType)
+            }, LinearLayout.LayoutParams(dp(54), dp(44)).apply { marginEnd = dp(6) })
             opLine.addView(iconBtn(R.drawable.ic_agg_lock, if (isFrozen) "解冻" else "冻结") {
                 Thread {
                     val success = if (isFrozen) {
@@ -3450,6 +3686,7 @@ class OverlayService : Service() {
         curVal: Any?,
         machineCode: String = "",
         dataType: String = searchDataType,
+        returnAction: (() -> Unit)? = null,
     ) {
         val address = addr.removePrefix("0x").removePrefix("0X").toLongOrNull(16)
         if (address == null) {
@@ -3458,6 +3695,9 @@ class OverlayService : Service() {
         }
         val normalizedType = dataType.takeIf { MemoryEngine.isSupportedType(it) } ?: "dword"
         val wasFrozen = MemoryFreezer.isFrozen(address)
+        fun returnToCaller() {
+            if (returnAction != null) returnAction() else showSearchPanel()
+        }
 
         makeDraggablePanel("编辑内存", { content ->
             val summary = LinearLayout(this).apply {
@@ -3558,7 +3798,7 @@ class OverlayService : Service() {
                     handler.post {
                         if (success) {
                             Toast.makeText(this@OverlayService, "已写入 $addr = $readBack", Toast.LENGTH_SHORT).show()
-                            showSearchPanel()
+                            returnToCaller()
                         } else {
                             state.text = "写入失败，请检查进程和地址状态"
                             state.setTextColor(Color.parseColor("#FFB4AB"))
@@ -3601,7 +3841,7 @@ class OverlayService : Service() {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(0, dp(7), 0, 0)
             }
-            actions.addView(dialogButton("取消") { showSearchPanel() }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginEnd = dp(3) })
+            actions.addView(dialogButton("取消") { returnToCaller() }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginEnd = dp(3) })
             actions.addView(dialogButton("写入", true) { writeValue(false) }, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
             actions.addView(
                 if (wasFrozen) {
@@ -3609,7 +3849,7 @@ class OverlayService : Service() {
                         if (MemoryFreezer.unfreeze(address)) {
                             updateResult(curVal ?: 0, false)
                             Toast.makeText(this@OverlayService, "已解除冻结", Toast.LENGTH_SHORT).show()
-                            showSearchPanel()
+                            returnToCaller()
                         }
                     }
                 } else {
@@ -3618,7 +3858,7 @@ class OverlayService : Service() {
                 LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(3) }
             )
             content.addView(actions)
-        }, 360, 320, onBack = { showSearchPanel() }, titleIcon = R.drawable.ic_agg_edit)
+        }, 360, 320, onBack = { returnToCaller() }, titleIcon = R.drawable.ic_agg_edit)
     }
 
     private fun showWriteDialogLegacy(

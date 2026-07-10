@@ -595,6 +595,36 @@ object MemoryEngine {
     // 兼容旧调用
     fun analyzeMemoryRegion(address: Int, range: Int): Map<String, Any> = analyzeMemoryRegion(address.toLong(), range)
 
+    fun readMemoryWindow(startAddress: Long, count: Int, type: String): List<Map<String, Any>> {
+        val pid = attachedPid ?: return emptyList()
+        if (startAddress <= 0L || !isSupportedType(type) || !isAttachedProcessAlive()) return emptyList()
+        val itemSize = getTypeSize(type)
+        val safeCount = count.coerceIn(1, 128)
+        val alignedStart = startAddress - (startAddress % itemSize.toLong())
+        val byteCount = safeCount * itemSize
+
+        return try {
+            val data = runBlocking { RootScanner.readMemory(pid, alignedStart, byteCount) } ?: return emptyList()
+            val actualCount = data.size / itemSize
+            List(actualCount) { index ->
+                val offset = index * itemSize
+                val bytes = data.copyOfRange(offset, offset + itemSize)
+                val address = alignedStart + offset
+                mapOf(
+                    "address" to "0x${address.toString(16).uppercase()}",
+                    "addressInt" to address,
+                    "value" to (bytesToValue(bytes, type) ?: 0),
+                    "type" to type,
+                    "machineCode" to bytes.joinToString(" ") { String.format("%02X", it) },
+                    "isFrozen" to MemoryFreezer.isFrozen(address),
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "readMemoryWindow failed: ${e.message}")
+            emptyList()
+        }
+    }
+
     private fun searchAllValues(type: String): List<Map<String, Any>> {
         val pid = attachedPid ?: return emptyList()
         if (activeRegions.isEmpty()) return emptyList()
