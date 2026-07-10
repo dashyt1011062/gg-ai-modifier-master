@@ -466,7 +466,162 @@ object LuaEngine {
         return 0
     }
 
+    private fun aggViewValue(spec: LuaViewBridge.ViewSpec): LuaTable {
+        val userdata = org.luaj.vm2.LuaUserdata(spec)
+        return LuaTable().apply {
+            set("__aggView", userdata)
+            set("getView", object : org.luaj.vm2.lib.ZeroArgFunction() {
+                override fun call(): LuaValue = userdata
+            })
+        }
+    }
+
+    private fun aggViewSpec(value: LuaValue): LuaViewBridge.ViewSpec? {
+        if (value.istable()) {
+            val hidden = value.checktable().get("__aggView")
+            return LuaViewBridge.viewFromUserdata(hidden)
+        }
+        return LuaViewBridge.viewFromUserdata(value)
+    }
+
+    private fun aggWindowValue(window: LuaViewBridge.WindowSpec): LuaTable {
+        return LuaTable().apply {
+            set("__aggWindow", org.luaj.vm2.LuaUserdata(window))
+        }
+    }
+
+    private fun aggWindowSpec(value: LuaValue): LuaViewBridge.WindowSpec? {
+        if (value.istable()) {
+            val hidden = value.checktable().get("__aggWindow")
+            return LuaViewBridge.windowFromUserdata(hidden)
+        }
+        return LuaViewBridge.windowFromUserdata(value)
+    }
+
     private fun registerAggApi(agg: LuaTable) {
+        agg.set("viewText", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue = aggViewValue(LuaViewBridge.TextSpec(arg.tojstring()))
+        })
+
+        agg.set("viewList", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                if (!args.arg(1).istable()) return LuaValue.valueOf("items must be a table")
+                val source = args.arg(1).checktable()
+                val items = mutableListOf<LuaViewBridge.ListItemSpec>()
+                for (index in 1..source.length()) {
+                    val item = source.get(index)
+                    if (!item.istable()) continue
+                    val table = item.checktable()
+                    val callback = table.get("main")
+                    if (!callback.isfunction()) continue
+                    items.add(
+                        LuaViewBridge.ListItemSpec(
+                            title = table.get("title").optjstring("菜单 $index"),
+                            subtitle = table.get("subTitle").optjstring(""),
+                            callback = callback,
+                        )
+                    )
+                }
+                val refresh = args.arg(2).takeIf { it.isfunction() }
+                return aggViewValue(LuaViewBridge.ListSpec(items, refresh))
+            }
+        })
+
+        agg.set("viewSwitch", object : OneArgFunction() {
+            override fun call(arg: LuaValue): LuaValue {
+                if (!arg.istable()) return LuaValue.valueOf("items must be a table")
+                val source = arg.checktable()
+                val items = mutableListOf<LuaViewBridge.SwitchItemSpec>()
+                for (index in 1..source.length()) {
+                    val item = source.get(index)
+                    if (!item.istable()) continue
+                    val table = item.checktable()
+                    val open = table.get("open")
+                    val close = table.get("close")
+                    if (!open.isfunction() || !close.isfunction()) continue
+                    items.add(
+                        LuaViewBridge.SwitchItemSpec(
+                            title = table.get("title").optjstring("开关 $index"),
+                            openCallback = open,
+                            closeCallback = close,
+                            checked = table.get("isCheck").toboolean(),
+                        )
+                    )
+                }
+                return aggViewValue(LuaViewBridge.SwitchSpec(items))
+            }
+        })
+
+        agg.set("viewMultiChoice", object : TwoArgFunction() {
+            override fun call(arg1: LuaValue, arg2: LuaValue): LuaValue {
+                if (!arg1.istable() || !arg2.isfunction()) return LuaValue.valueOf("invalid arguments")
+                val source = arg1.checktable()
+                val items = (1..source.length()).map { source.get(it).tojstring() }
+                return aggViewValue(LuaViewBridge.MultiChoiceSpec(items, arg2))
+            }
+        })
+
+        agg.set("viewPrompt", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                if (!args.arg(1).istable()) return LuaValue.valueOf("prompts must be a table")
+                val prompts = args.arg(1).checktable()
+                val defaults = if (args.narg() >= 2 && args.arg(2).istable()) args.arg(2).checktable() else LuaTable()
+                val types = if (args.narg() >= 3 && args.arg(3).istable()) args.arg(3).checktable() else LuaTable()
+                val callback = args.arg(4)
+                if (!callback.isfunction()) return LuaValue.valueOf("onclick must be a function")
+                val fields = mutableListOf<LuaViewBridge.PromptFieldSpec>()
+                for (index in 1..prompts.length()) {
+                    val prompt = prompts.get(index)
+                    val options = if (prompt.istable()) {
+                        val table = prompt.checktable()
+                        (1..table.length()).map { table.get(it).tojstring() }
+                    } else emptyList()
+                    val label = if (prompt.istable()) "选择项 $index" else prompt.tojstring()
+                    fields.add(
+                        LuaViewBridge.PromptFieldSpec(
+                            label = label,
+                            type = types.get(index).optjstring(if (options.isEmpty()) "text" else "number"),
+                            defaultValue = defaults.get(index),
+                            options = options,
+                        )
+                    )
+                }
+                return aggViewValue(LuaViewBridge.PromptSpec(fields, callback))
+            }
+        })
+
+        agg.set("viewWeb", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                val callbacks = linkedMapOf<String, LuaValue>()
+                if (args.narg() >= 2 && args.arg(2).istable()) {
+                    val table = args.arg(2).checktable()
+                    var key = LuaValue.NIL
+                    while (true) {
+                        val next = table.next(key)
+                        key = next.arg1()
+                        if (key.isnil()) break
+                        val value = next.arg(2)
+                        if (value.isfunction()) callbacks[key.tojstring()] = value
+                    }
+                }
+                return aggViewValue(LuaViewBridge.WebSpec(args.arg(1).tojstring(), callbacks))
+            }
+        })
+
+        agg.set("mainTabs", object : VarArgFunction() {
+            override fun invoke(args: Varargs): Varargs {
+                val title = args.arg(1).tojstring()
+                val view = aggViewSpec(args.arg(2)) ?: return LuaValue.valueOf("invalid AGG view")
+                val locked = args.narg() >= 3 && args.arg(3).toboolean()
+                val window = if (args.narg() >= 4) aggWindowSpec(args.arg(4)) else null
+                    ?: LuaViewBridge.WindowSpec()
+                window.tabs.add(LuaViewBridge.TabSpec(title, view, locked))
+                window.activeIndex = window.tabs.lastIndex
+                OverlayService.showLuaWindow(window)
+                return aggWindowValue(window)
+            }
+        })
+
         agg.set("notification", object : TwoArgFunction() {
             override fun call(arg1: LuaValue, arg2: LuaValue): LuaValue {
                 val ctx = context ?: return LuaValue.FALSE

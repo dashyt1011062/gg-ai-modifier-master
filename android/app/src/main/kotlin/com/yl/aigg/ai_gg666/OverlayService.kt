@@ -83,6 +83,11 @@ class OverlayService : Service() {
                 service.showMemoryEditorPanel(address, service.memoryEditorType)
             }
         }
+
+        fun showLuaWindow(window: LuaViewBridge.WindowSpec) {
+            val service = activeInstance ?: return
+            service.handler.post { service.showLuaWindowPanel(window) }
+        }
     }
 
     private var wm: WindowManager? = null
@@ -127,6 +132,7 @@ class OverlayService : Service() {
     // 记住上次打开的面板
     private var lastPanel = ""
     private var activePanel = ""
+    private var aggMainTab = 1
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -479,6 +485,289 @@ class OverlayService : Service() {
         }
     }
 
+    private fun showLuaWindowPanel(window: LuaViewBridge.WindowSpec) {
+        if (window.tabs.isEmpty()) return
+        window.activeIndex = window.activeIndex.coerceIn(0, window.tabs.lastIndex)
+        val activeTab = window.tabs[window.activeIndex]
+        val lockedBack: () -> Unit = if (activeTab.locked) {
+            { Toast.makeText(this, "该脚本界面已锁定", Toast.LENGTH_SHORT).show() }
+        } else {
+            { showScriptPanel() }
+        }
+
+        makeDraggablePanel("AGG · ${activeTab.title}", { content ->
+            fun scriptButton(label: String, accent: Boolean = false, action: () -> Unit): TextView {
+                return TextView(this).apply {
+                    text = label
+                    gravity = Gravity.CENTER
+                    textSize = 10f
+                    setTextColor(if (accent) Color.parseColor("#231A2E") else Color.parseColor("#E6E0E9"))
+                    setTypeface(null, if (accent) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                    background = aggMenuDrawable(
+                        if (accent) Color.parseColor("#D0BCFF") else Color.parseColor("#302D35"),
+                        9,
+                        if (accent) Color.parseColor("#E8DEF8") else Color.parseColor("#49454F"),
+                    )
+                    setOnClickListener { action() }
+                }
+            }
+
+            if (window.tabs.size > 1) {
+                val tabScroll = android.widget.HorizontalScrollView(this).apply {
+                    isHorizontalScrollBarEnabled = false
+                }
+                val tabRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                window.tabs.forEachIndexed { index, tab ->
+                    tabRow.addView(scriptButton(tab.title, accent = index == window.activeIndex) {
+                        window.activeIndex = index
+                        showLuaWindowPanel(window)
+                    }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)).apply { marginEnd = dp(4) })
+                }
+                tabScroll.addView(tabRow)
+                content.addView(tabScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(38)).apply { bottomMargin = dp(5) })
+            }
+
+            fun scrollContainer(): Pair<ScrollView, LinearLayout> {
+                val holder = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(2), dp(2), dp(2), dp(2))
+                }
+                val scroll = ScrollView(this).apply {
+                    isFillViewport = true
+                    addView(holder)
+                }
+                return scroll to holder
+            }
+
+            when (val spec = activeTab.view) {
+                is LuaViewBridge.TextSpec -> {
+                    val (scroll, holder) = scrollContainer()
+                    holder.addView(TextView(this).apply {
+                        text = spec.text
+                        setTextColor(Color.parseColor("#E6E0E9"))
+                        textSize = 11f
+                        setTextIsSelectable(true)
+                        setLineSpacing(0f, 1.15f)
+                        setPadding(dp(8), dp(8), dp(8), dp(12))
+                        background = aggMenuDrawable(Color.parseColor("#211F26"), 9, Color.parseColor("#3A3641"))
+                    })
+                    content.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+                }
+
+                is LuaViewBridge.ListSpec -> {
+                    val (scroll, holder) = scrollContainer()
+                    spec.items.forEachIndexed { index, item ->
+                        holder.addView(LinearLayout(this).apply {
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(dp(11), dp(8), dp(11), dp(8))
+                            background = aggMenuDrawable(Color.parseColor("#25222B"), 9, Color.parseColor("#3A3641"))
+                            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                            addView(TextView(this@OverlayService).apply {
+                                text = item.title
+                                setTextColor(Color.parseColor("#F3EDF7"))
+                                textSize = 11.5f
+                                setTypeface(null, android.graphics.Typeface.BOLD)
+                            })
+                            if (item.subtitle.isNotBlank()) addView(TextView(this@OverlayService).apply {
+                                text = item.subtitle
+                                setTextColor(Color.parseColor("#938F99"))
+                                textSize = 9f
+                                setPadding(0, dp(2), 0, 0)
+                            })
+                            setOnClickListener { LuaViewBridge.invokeAsync(item.callback) }
+                        })
+                    }
+                    content.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+                    spec.refreshCallback?.takeIf { it.isfunction() }?.let { callback ->
+                        content.addView(scriptButton("刷新列表") { LuaViewBridge.invokeAsync(callback) }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(38)).apply { topMargin = dp(6) })
+                    }
+                }
+
+                is LuaViewBridge.SwitchSpec -> {
+                    val (scroll, holder) = scrollContainer()
+                    spec.items.forEach { item ->
+                        val row = LinearLayout(this).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(dp(10), dp(6), dp(7), dp(6))
+                            background = aggMenuDrawable(Color.parseColor("#25222B"), 9, Color.parseColor("#3A3641"))
+                            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)).apply { bottomMargin = dp(4) }
+                        }
+                        row.addView(TextView(this).apply {
+                            text = item.title
+                            setTextColor(Color.parseColor("#F3EDF7"))
+                            textSize = 11f
+                            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                        })
+                        row.addView(android.widget.Switch(this).apply {
+                            isChecked = item.checked
+                            setOnCheckedChangeListener { _, checked ->
+                                item.checked = checked
+                                LuaViewBridge.invokeAsync(if (checked) item.openCallback else item.closeCallback)
+                            }
+                        })
+                        holder.addView(row)
+                    }
+                    content.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+                }
+
+                is LuaViewBridge.MultiChoiceSpec -> {
+                    val (scroll, holder) = scrollContainer()
+                    spec.items.forEachIndexed { index, label ->
+                        holder.addView(android.widget.CheckBox(this).apply {
+                            text = label
+                            isChecked = index in spec.selected
+                            setTextColor(Color.parseColor("#E6E0E9"))
+                            textSize = 10.5f
+                            buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#D0BCFF"))
+                            background = aggMenuDrawable(Color.parseColor("#25222B"), 8, Color.parseColor("#3A3641"))
+                            setPadding(dp(9), dp(4), dp(9), dp(4))
+                            setOnCheckedChangeListener { _, checked ->
+                                if (checked) spec.selected.add(index) else spec.selected.remove(index)
+                            }
+                            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)).apply { bottomMargin = dp(3) }
+                        })
+                    }
+                    content.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+                    content.addView(scriptButton("确认选择", true) {
+                        LuaViewBridge.invokeAsync(spec.callback, LuaViewBridge.selectedItemsTable(spec.items, spec.selected))
+                    }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)).apply { topMargin = dp(6) })
+                }
+
+                is LuaViewBridge.PromptSpec -> {
+                    val (scroll, holder) = scrollContainer()
+                    val getters = mutableListOf<() -> org.luaj.vm2.LuaValue>()
+                    spec.fields.forEach { field ->
+                        holder.addView(TextView(this).apply {
+                            text = field.label
+                            setTextColor(Color.parseColor("#CAC4D0"))
+                            textSize = 9.5f
+                            setPadding(dp(4), dp(7), dp(4), dp(3))
+                        })
+                        when {
+                            field.type == "checkbox" -> {
+                                val check = android.widget.CheckBox(this).apply {
+                                    text = if (field.defaultValue.toboolean()) "已启用" else "未启用"
+                                    isChecked = field.defaultValue.toboolean()
+                                    setTextColor(Color.parseColor("#E6E0E9"))
+                                    buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#D0BCFF"))
+                                    setOnCheckedChangeListener { _, checked -> text = if (checked) "已启用" else "未启用" }
+                                }
+                                holder.addView(check, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)))
+                                getters.add { org.luaj.vm2.LuaValue.valueOf(check.isChecked) }
+                            }
+
+                            field.type == "slider" && field.defaultValue.istable() -> {
+                                val values = field.defaultValue.checktable()
+                                val from = values.get("from").optint(0)
+                                val to = values.get("to").optint(100)
+                                val step = values.get("size").optint(1).coerceAtLeast(1)
+                                var current = values.get("value").optint(from).coerceIn(minOf(from, to), maxOf(from, to))
+                                val valueLabel = TextView(this).apply {
+                                    text = current.toString()
+                                    setTextColor(Color.parseColor("#D0BCFF"))
+                                    textSize = 10f
+                                    gravity = Gravity.END
+                                }
+                                val seek = android.widget.SeekBar(this).apply {
+                                    max = ((to - from).coerceAtLeast(0) / step).coerceAtLeast(1)
+                                    progress = ((current - from) / step).coerceIn(0, max)
+                                    setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                                        override fun onProgressChanged(seekBar: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
+                                            current = from + progress * step
+                                            valueLabel.text = current.toString()
+                                        }
+                                        override fun onStartTrackingTouch(seekBar: android.widget.SeekBar?) = Unit
+                                        override fun onStopTrackingTouch(seekBar: android.widget.SeekBar?) = Unit
+                                    })
+                                }
+                                holder.addView(valueLabel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(22)))
+                                holder.addView(seek, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)))
+                                getters.add { org.luaj.vm2.LuaValue.valueOf(current) }
+                            }
+
+                            field.options.isNotEmpty() && field.type != "chip" -> {
+                                val spinner = Spinner(this).apply {
+                                    adapter = ArrayAdapter(this@OverlayService, android.R.layout.simple_spinner_item, field.options).apply {
+                                        setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+                                    }
+                                    val selected = field.defaultValue.optint(1).coerceIn(1, field.options.size) - 1
+                                    setSelection(selected)
+                                    background = aggMenuDrawable(Color.parseColor("#34313A"), 8, Color.parseColor("#49454F"))
+                                }
+                                holder.addView(spinner, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)))
+                                getters.add { org.luaj.vm2.LuaValue.valueOf(spinner.selectedItemPosition + 1) }
+                            }
+
+                            else -> {
+                                val input = EditText(this).apply {
+                                    val defaultText = when {
+                                        field.defaultValue.isnil() -> ""
+                                        field.defaultValue.istable() -> {
+                                            val table = field.defaultValue.checktable()
+                                            (1..table.length()).joinToString(",") { table.get(it).tojstring() }
+                                        }
+                                        else -> field.defaultValue.tojstring()
+                                    }
+                                    setText(defaultText)
+                                    setSingleLine(field.type != "range_slider" && field.type != "chip")
+                                    textSize = 10.5f
+                                    setTextColor(Color.parseColor("#F3EDF7"))
+                                    setHintTextColor(Color.parseColor("#938F99"))
+                                    inputType = if (field.type == "number" || field.type == "speed") {
+                                        android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+                                    } else android.text.InputType.TYPE_CLASS_TEXT
+                                    setPadding(dp(10), 0, dp(10), 0)
+                                    background = aggMenuDrawable(Color.parseColor("#25222B"), 8, Color.parseColor("#49454F"))
+                                }
+                                holder.addView(input, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, if (input.isSingleLine) dp(42) else dp(64)))
+                                getters.add {
+                                    val raw = input.text.toString()
+                                    if (field.type == "number" || field.type == "speed") {
+                                        raw.toDoubleOrNull()?.let { org.luaj.vm2.LuaValue.valueOf(it) } ?: org.luaj.vm2.LuaValue.valueOf(raw)
+                                    } else if (field.type == "range_slider" || field.type == "chip") {
+                                        org.luaj.vm2.LuaTable().apply {
+                                            raw.split(',').map { it.trim() }.filter { it.isNotEmpty() }.forEachIndexed { index, value ->
+                                                set(index + 1, value.toDoubleOrNull()?.let { org.luaj.vm2.LuaValue.valueOf(it) } ?: org.luaj.vm2.LuaValue.valueOf(value))
+                                            }
+                                        }
+                                    } else org.luaj.vm2.LuaValue.valueOf(raw)
+                                }
+                            }
+                        }
+                    }
+                    content.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+                    content.addView(scriptButton("提交", true) {
+                        val values = org.luaj.vm2.LuaTable()
+                        getters.forEachIndexed { index, getter -> values.set(index + 1, getter()) }
+                        LuaViewBridge.invokeAsync(spec.callback, values)
+                    }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)).apply { topMargin = dp(6) })
+                }
+
+                is LuaViewBridge.WebSpec -> {
+                    val web = android.webkit.WebView(this).apply {
+                        setBackgroundColor(Color.parseColor("#17151B"))
+                        settings.javaScriptEnabled = spec.callbacks.isNotEmpty()
+                        settings.domStorageEnabled = true
+                        spec.callbacks.forEach { (name, callback) ->
+                            addJavascriptInterface(LuaViewBridge.JavascriptBridge(callback), name)
+                        }
+                        webViewClient = android.webkit.WebViewClient()
+                        if (spec.source.trimStart().startsWith("http://") || spec.source.trimStart().startsWith("https://")) {
+                            loadUrl(spec.source)
+                        } else {
+                            loadDataWithBaseURL(null, spec.source, "text/html", "UTF-8", null)
+                        }
+                    }
+                    content.addView(web, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+                }
+            }
+        }, 430, 590, onBack = lockedBack, titleIcon = R.drawable.ic_agg_script)
+    }
+
     // ==================== 主菜单 ====================
 
     private fun showLastOrMainMenu() {
@@ -665,8 +954,9 @@ class OverlayService : Service() {
         val screenW = dm.widthPixels
         val screenH = dm.heightPixels
         val isLandscape = screenW > screenH
-        val panelW = dp(if (isLandscape) 700 else 380).coerceAtMost((screenW - dp(16)).coerceAtLeast(1))
-        val panelH = dp(if (isLandscape) 420 else 570).coerceAtMost((screenH - dp(20)).coerceAtLeast(1))
+        val panelW = dp(if (isLandscape) 760 else 408).coerceAtMost((screenW - dp(10)).coerceAtLeast(1))
+        val panelH = dp(if (isLandscape) 438 else 586).coerceAtMost((screenH - dp(10)).coerceAtLeast(1))
+
         val attachedPid = MemoryEngine.getAttachedPid()
         val pid = attachedPid?.takeIf { MemoryEngine.isAttachedProcessAlive() }
         if (attachedPid != null && pid == null) {
@@ -676,115 +966,15 @@ class OverlayService : Service() {
         val prefs = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
         val processName = prefs.getString("attached_name", null)?.takeIf { it.isNotBlank() }
         val packageName = prefs.getString("attached_package", null)?.takeIf { it.isNotBlank() }
+        val displayName = if (pid != null) (processName ?: packageName ?: "已选择进程") else "未选择进程"
 
         val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(1), dp(1), dp(1), dp(1))
-            background = aggMenuDrawable(Color.parseColor("#211F26"), 18, Color.parseColor("#4A4458"))
-            elevation = dp(14).toFloat()
-        }
-
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(4), dp(5), dp(4))
-            background = GradientDrawable().apply {
-                cornerRadii = floatArrayOf(
-                    dp(17).toFloat(), dp(17).toFloat(),
-                    dp(17).toFloat(), dp(17).toFloat(),
-                    0f, 0f, 0f, 0f
-                )
-                setColor(Color.parseColor("#2B2930"))
-            }
-        }
-        header.addView(ImageView(this).apply {
-            setImageResource(R.drawable.xfc)
-            scaleType = ImageView.ScaleType.CENTER_INSIDE
-            background = aggMenuDrawable(Color.parseColor("#4A4458"), 10, Color.parseColor("#675F72"))
-            setPadding(dp(5), dp(5), dp(5), dp(5))
-        }, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(8) })
-        header.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            addView(TextView(this@OverlayService).apply {
-                text = "GG-AI"
-                setTextColor(Color.parseColor("#F3EDF7"))
-                textSize = 13.5f
-                setTypeface(null, android.graphics.Typeface.BOLD)
-                letterSpacing = 0.04f
-            })
-            addView(TextView(this@OverlayService).apply {
-                text = if (pid != null) "已连接 · PID $pid" else "未选择进程"
-                setTextColor(if (pid != null) Color.parseColor("#C8F7DC") else Color.parseColor("#CAC4D0"))
-                textSize = 9.5f
-            })
-        })
-        fun headerIcon(res: Int, tint: String, action: () -> Unit): ImageView {
-            return ImageView(this).apply {
-                setImageResource(res)
-                setColorFilter(Color.parseColor(tint))
-                setPadding(dp(7), dp(7), dp(7), dp(7))
-                background = aggMenuDrawable(Color.TRANSPARENT, 8, Color.TRANSPARENT)
-                setOnClickListener { pressAndRun(this) { action() } }
-            }
-        }
-        header.addView(headerIcon(R.drawable.ic_agg_minimize, "#E6E0E9") { closePanel() }, LinearLayout.LayoutParams(dp(30), dp(30)))
-        header.addView(headerIcon(R.drawable.ic_agg_close, "#FFB4AB") { stopSelf() }, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(4) })
-        root.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)))
-
-        val body = LinearLayout(this).apply {
             orientation = if (isLandscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
-            setPadding(dp(6), dp(6), dp(6), dp(6))
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+            setPadding(dp(5), dp(5), dp(5), dp(5))
+            setBackgroundResource(R.drawable.agg_window_background)
+            elevation = dp(12).toFloat()
         }
-        root.addView(body)
-
-        fun navigationItem(iconRes: Int, label: String, action: () -> Unit): LinearLayout {
-            return LinearLayout(this).apply {
-                orientation = if (isLandscape) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-                setPadding(dp(4), dp(4), dp(4), dp(4))
-                background = aggMenuDrawable(Color.parseColor("#2B2930"), 9, Color.parseColor("#3A3641"))
-                setOnClickListener { pressAndRun(this) { action() } }
-                addView(ImageView(this@OverlayService).apply {
-                    setImageResource(iconRes)
-                    setColorFilter(Color.parseColor("#D0BCFF"))
-                    scaleType = ImageView.ScaleType.CENTER_INSIDE
-                }, LinearLayout.LayoutParams(dp(22), dp(22)).apply { if (!isLandscape) marginEnd = dp(5) })
-                addView(TextView(this@OverlayService).apply {
-                    text = label
-                    setTextColor(Color.parseColor("#E6E0E9"))
-                    textSize = if (isLandscape) 8.5f else 9.5f
-                    gravity = Gravity.CENTER
-                    if (isLandscape) setPadding(0, dp(2), 0, 0)
-                })
-            }
-        }
-
-        val navigation = LinearLayout(this).apply {
-            orientation = if (isLandscape) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(dp(4), dp(4), dp(4), dp(4))
-            background = aggMenuDrawable(Color.parseColor("#17151B"), 11, Color.parseColor("#302C37"))
-            layoutParams = if (isLandscape) {
-                LinearLayout.LayoutParams(dp(76), LinearLayout.LayoutParams.MATCH_PARENT).apply { marginEnd = dp(6) }
-            } else {
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(56)).apply { bottomMargin = dp(6) }
-            }
-        }
-        val navLp = if (isLandscape) {
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f).apply { bottomMargin = dp(3) }
-        } else {
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginEnd = dp(3) }
-        }
-        navigation.addView(navigationItem(R.drawable.ic_agg_apps, "进程") { showProcessPanel() }, navLp)
-        navigation.addView(navigationItem(R.drawable.ic_agg_memory, "搜索") { showSearchPanel() }, LinearLayout.LayoutParams(navLp))
-        navigation.addView(navigationItem(R.drawable.ic_agg_lock, "保存") { showSavedListPanel() }, LinearLayout.LayoutParams(navLp))
-        navigation.addView(navigationItem(R.drawable.ic_agg_ai, "AI") { showAIChatPanel() }, LinearLayout.LayoutParams(navLp))
-        navigation.addView(navigationItem(R.drawable.ic_agg_script, "脚本") { showScriptPanel() }, LinearLayout.LayoutParams(navLp).apply { marginEnd = 0; bottomMargin = 0 })
-        body.addView(navigation)
-
-        val workspace = LinearLayout(this).apply {
+        val mainColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = if (isLandscape) {
                 LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
@@ -792,140 +982,647 @@ class OverlayService : Service() {
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
             }
         }
-        body.addView(workspace)
 
-        val processCard = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(10), dp(8), dp(8), dp(8))
-            background = aggMenuDrawable(Color.parseColor("#25222B"), 12, if (pid != null) Color.parseColor("#4D705E") else Color.parseColor("#49454F"))
-            setOnClickListener { if (pid != null) showSearchPanel() else showProcessPanel() }
+        fun divider(horizontal: Boolean = true): View = View(this).apply {
+            setBackgroundColor(Color.parseColor("#C0FFFFFF"))
+            layoutParams = if (horizontal) {
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
+            } else {
+                LinearLayout.LayoutParams(dp(1), LinearLayout.LayoutParams.MATCH_PARENT)
+            }
         }
-        processCard.addView(ImageView(this).apply {
-            setImageResource(if (pid != null) R.drawable.ic_agg_memory else R.drawable.ic_agg_apps)
-            setColorFilter(if (pid != null) Color.parseColor("#C8F7DC") else Color.parseColor("#D0BCFF"))
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-            background = aggMenuDrawable(Color.parseColor("#34313A"), 10, Color.parseColor("#49454F"))
-        }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginEnd = dp(9) })
-        processCard.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            addView(TextView(this@OverlayService).apply {
-                text = if (pid != null) (processName ?: "目标进程") else "选择运行中的应用"
-                maxLines = 1
-                ellipsize = android.text.TextUtils.TruncateAt.END
-                setTextColor(Color.parseColor("#F3EDF7"))
-                textSize = 12.5f
-                setTypeface(null, android.graphics.Typeface.BOLD)
-            })
-            addView(TextView(this@OverlayService).apply {
-                text = if (pid != null) "${packageName ?: "目标进程"} · PID $pid" else "附加后即可搜索、修改和冻结内存"
-                maxLines = 1
-                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-                setTextColor(Color.parseColor("#CAC4D0"))
-                textSize = 9.5f
-                setPadding(0, dp(2), 0, 0)
-            })
-        })
-        processCard.addView(TextView(this).apply {
-            text = if (pid != null) "进入搜索" else "选择进程"
+
+        fun iconView(resId: Int, size: Int = 48, padding: Int = 12, action: (() -> Unit)? = null): ImageView {
+            return ImageView(this).apply {
+                setImageResource(resId)
+                scaleType = ImageView.ScaleType.CENTER_INSIDE
+                setPadding(dp(padding), dp(padding), dp(padding), dp(padding))
+                setColorFilter(Color.WHITE)
+                if (action != null) setOnClickListener { action() }
+                layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
+            }
+        }
+
+        fun smallCounter(value: Int): TextView = TextView(this).apply {
+            text = value.toString()
             gravity = Gravity.CENTER
-            setTextColor(Color.parseColor("#231A2E"))
-            textSize = 9.5f
-            setTypeface(null, android.graphics.Typeface.BOLD)
-            background = aggMenuDrawable(Color.parseColor("#D0BCFF"), 8, Color.parseColor("#E8DEF8"))
-        }, LinearLayout.LayoutParams(dp(72), dp(34)).apply { marginStart = dp(7) })
-        workspace.addView(processCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(68)))
+            setTextColor(Color.WHITE)
+            textSize = 8f
+            setPadding(dp(3), 0, dp(3), 0)
+            setBackgroundResource(R.drawable.agg_counter)
+            visibility = if (value > 0) View.VISIBLE else View.GONE
+            minWidth = dp(14)
+            minHeight = dp(14)
+        }
 
-        workspace.addView(TextView(this).apply {
-            text = "快捷工具"
-            setTextColor(Color.parseColor("#CAC4D0"))
-            textSize = 10f
-            setTypeface(null, android.graphics.Typeface.BOLD)
-            setPadding(dp(3), dp(7), dp(3), dp(5))
-        })
+        fun tabBackground(selected: Boolean): GradientDrawable = GradientDrawable().apply {
+            cornerRadius = dp(6).toFloat()
+            setColor(if (selected) Color.argb(82, 98, 0, 238) else Color.TRANSPARENT)
+            setStroke(dp(if (selected) 1 else 0), if (selected) Color.parseColor("#FFB8B8B8") else Color.TRANSPARENT)
+        }
 
-        fun toolCard(iconRes: Int, title: String, subtitle: String, tint: String, action: () -> Unit): LinearLayout {
-            return LinearLayout(this).apply {
+        val tabIcons = intArrayOf(
+            R.drawable.ic_tune_white_24dp,
+            R.drawable.ic_magnify_white_24dp,
+            R.drawable.ic_content_save_white_24dp,
+            R.drawable.ic_format_list_bulleted_white_24dp,
+            R.drawable.ic_dbg,
+        )
+        val tabNames = arrayOf("配置", "搜索", "保存", "内存", "断点")
+        val tabViews = mutableListOf<View>()
+        lateinit var renderTab: (Int) -> Unit
+
+        val appFrame = android.widget.FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(if (isLandscape) 54 else 48), dp(48))
+            setOnClickListener { showProcessPanel() }
+        }
+        appFrame.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_gg_48dp)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+        }, android.widget.FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER))
+        if (!packageName.isNullOrBlank()) {
+            val targetIcon = try { packageManager.getApplicationIcon(packageName) } catch (_: Exception) { null }
+            if (targetIcon != null) {
+                appFrame.addView(ImageView(this).apply {
+                    setImageDrawable(targetIcon)
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(Color.WHITE)
+                    }
+                }, android.widget.FrameLayout.LayoutParams(dp(20), dp(20), Gravity.TOP or Gravity.START))
+            }
+        }
+
+        fun createTab(index: Int, vertical: Boolean): View {
+            val frame = android.widget.FrameLayout(this).apply {
+                background = tabBackground(index == aggMainTab)
+                setOnClickListener { renderTab(index) }
+                contentDescription = tabNames[index]
+            }
+            frame.addView(ImageView(this).apply {
+                setImageResource(tabIcons[index])
+                setColorFilter(Color.WHITE)
+                scaleType = ImageView.ScaleType.CENTER_INSIDE
+                setPadding(dp(12), dp(if (vertical) 8 else 12), dp(12), dp(if (vertical) 16 else 12))
+            }, android.widget.FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP or Gravity.CENTER_HORIZONTAL))
+            if (vertical) {
+                frame.addView(TextView(this).apply {
+                    text = tabNames[index]
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.WHITE)
+                    textSize = 8f
+                }, android.widget.FrameLayout.LayoutParams(dp(56), dp(18), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+            }
+            val count = when (index) {
+                1 -> searchResults.size
+                2 -> loadSavedMemoryItems().size
+                else -> 0
+            }
+            if (count > 0) {
+                frame.addView(smallCounter(count), android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP or Gravity.END,
+                ))
+            }
+            frame.layoutParams = LinearLayout.LayoutParams(dp(if (vertical) 56 else 48), dp(if (vertical) 56 else 48))
+            tabViews.add(frame)
+            return frame
+        }
+
+        val topMore = iconView(R.drawable.ic_menu_white_24dp) {
+            when (aggMainTab) {
+                0 -> showProcessPanel()
+                1 -> showSearchPanel()
+                2 -> showSavedListPanel()
+                3 -> showMemoryEditorPanel()
+                else -> Toast.makeText(this, "断点调试模块将在后续阶段接入", Toast.LENGTH_SHORT).show()
+            }
+        }
+        val closeButton = iconView(R.drawable.ic_close_white_24dp) { closePanel() }
+
+        if (isLandscape) {
+            val rail = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(dp(58), LinearLayout.LayoutParams.MATCH_PARENT)
+            }
+            rail.addView(appFrame, LinearLayout.LayoutParams(dp(56), dp(48)))
+            for (i in tabNames.indices) rail.addView(createTab(i, true))
+            rail.addView(View(this), LinearLayout.LayoutParams(dp(1), 0, 1f))
+            rail.addView(closeButton, LinearLayout.LayoutParams(dp(48), dp(48)))
+            root.addView(rail)
+            root.addView(divider(horizontal = false))
+            root.addView(mainColumn)
+        } else {
+            val tabsRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(8), dp(7), dp(8), dp(7))
-                background = aggMenuDrawable(Color.parseColor("#25222B"), 10, Color.parseColor("#3A3641"))
-                setOnClickListener { pressAndRun(this) { action() } }
-                addView(ImageView(this@OverlayService).apply {
-                    setImageResource(iconRes)
-                    setColorFilter(Color.parseColor(tint))
-                    setPadding(dp(7), dp(7), dp(7), dp(7))
-                    background = aggMenuDrawable(Color.parseColor("#34313A"), 9, Color.parseColor("#49454F"))
-                }, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(8) })
-                addView(LinearLayout(this@OverlayService).apply {
-                    orientation = LinearLayout.VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                    addView(TextView(this@OverlayService).apply {
-                        text = title
-                        setTextColor(Color.parseColor("#F3EDF7"))
-                        textSize = 11.5f
-                        setTypeface(null, android.graphics.Typeface.BOLD)
-                    })
-                    addView(TextView(this@OverlayService).apply {
-                        text = subtitle
-                        setTextColor(Color.parseColor("#938F99"))
-                        textSize = 8.8f
-                        maxLines = 1
-                    })
-                })
-                addView(TextView(this@OverlayService).apply {
-                    text = "›"
-                    gravity = Gravity.CENTER
-                    setTextColor(Color.parseColor("#938F99"))
-                    textSize = 18f
-                }, LinearLayout.LayoutParams(dp(20), LinearLayout.LayoutParams.MATCH_PARENT))
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
             }
+            tabsRow.addView(appFrame)
+            for (i in tabNames.indices) tabsRow.addView(createTab(i, false))
+            tabsRow.addView(topMore)
+            tabsRow.addView(closeButton)
+            mainColumn.addView(tabsRow)
+            root.addView(mainColumn)
         }
 
-        val row1 = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
-        }
-        row1.addView(toolCard(R.drawable.ic_agg_edit, "内存编辑器", "跳转地址并连续浏览附近内存", "#D0BCFF") { showMemoryEditorPanel() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginEnd = dp(3) })
-        row1.addView(toolCard(R.drawable.ic_agg_memory, "内存搜索", "精确、模糊、范围和特征码", "#A9C7FF") { showSearchPanel() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginStart = dp(3) })
-        workspace.addView(row1)
-
-        val row2 = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(6), 0, 0)
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
-        }
-        row2.addView(toolCard(R.drawable.ic_agg_apps, "进程控制", "暂停、恢复、切换或结束目标", "#FFD8A8") { showProcessControlPanel() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginEnd = dp(3) })
-        row2.addView(toolCard(R.drawable.ic_agg_memory, "内存工具", "复制内存和转储地址范围", "#C8F7DC") { showMemoryToolsPanel() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginStart = dp(3) })
-        workspace.addView(row2)
-
-        val footer = LinearLayout(this).apply {
+        val toolbarRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(6), 0, 0)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
         }
-        footer.addView(TextView(this).apply {
-            text = "打开主界面"
-            gravity = Gravity.CENTER
-            setTextColor(Color.parseColor("#E6E0E9"))
-            textSize = 10f
-            background = aggMenuDrawable(Color.parseColor("#302D35"), 9, Color.parseColor("#49454F"))
-            setOnClickListener {
-                try {
-                    startActivity(Intent(this@OverlayService, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                } catch (_: Exception) {}
+        val toolbar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f)
+        }
+        val toolbarMore = iconView(R.drawable.ic_menu_white_24dp, 45, 12) {
+            when (aggMainTab) {
+                0 -> showProcessPanel()
+                1 -> showSearchPanel()
+                2 -> showSavedListPanel()
+                3 -> showMemoryEditorPanel()
+                else -> Toast.makeText(this, "暂无断点记录", Toast.LENGTH_SHORT).show()
             }
-        }, LinearLayout.LayoutParams(0, dp(34), 1f).apply { marginEnd = dp(3) })
-        footer.addView(TextView(this).apply {
-            text = "退出 GG-AI"
-            gravity = Gravity.CENTER
-            setTextColor(Color.parseColor("#FFB4AB"))
+        }
+        toolbarRow.addView(toolbar)
+        toolbarRow.addView(toolbarMore, LinearLayout.LayoutParams(dp(45), dp(48)))
+        toolbarRow.addView(divider(horizontal = false), LinearLayout.LayoutParams(dp(1), dp(48)))
+        if (isLandscape) toolbarRow.addView(iconView(R.drawable.ic_close_white_24dp) { closePanel() })
+        mainColumn.addView(toolbarRow)
+        mainColumn.addView(divider())
+
+        val infoRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(26))
+        }
+        val pauseButton = iconView(R.drawable.ic_pause_white_18dp, 32, 7) {
+            val currentPid = MemoryEngine.getAttachedPid()
+            if (currentPid == null) {
+                showProcessPanel()
+            } else {
+                val paused = isTargetProcessPaused(currentPid)
+                if (setTargetProcessPaused(currentPid, !paused)) {
+                    Toast.makeText(this, if (paused) "进程已恢复" else "进程已暂停", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        val appNameText = TextView(this).apply {
+            text = displayName
+            gravity = Gravity.CENTER_VERTICAL
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setTextColor(Color.WHITE)
             textSize = 10f
-            background = aggMenuDrawable(Color.parseColor("#35232A"), 9, Color.parseColor("#68404A"))
-            setOnClickListener { stopSelf() }
-        }, LinearLayout.LayoutParams(0, dp(34), 1f).apply { marginStart = dp(3) })
-        workspace.addView(footer)
+            setPadding(dp(2), 0, dp(6), 0)
+        }
+        val infoFilter = TextView(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setTextColor(Color.WHITE)
+            textSize = 9f
+        }
+        val valueFormat = TextView(this).apply {
+            text = "h,D,F"
+            gravity = Gravity.CENTER_VERTICAL
+            setTextColor(Color.WHITE)
+            textSize = 9f
+            setPadding(dp(3), 0, dp(3), 0)
+        }
+        val foundCount = TextView(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setTextColor(Color.WHITE)
+            textSize = 9f
+            setPadding(dp(2), 0, dp(2), 0)
+        }
+        val infoMenu = iconView(R.drawable.ic_menu_white_24dp, 32, 7) { showProcessControlPanel() }
+        val infoRefresh = iconView(R.drawable.ic_refresh_white_18dp, 32, 7) { renderTab(aggMainTab) }
+        infoRow.addView(pauseButton, LinearLayout.LayoutParams(dp(32), dp(26)))
+        infoRow.addView(appNameText, LinearLayout.LayoutParams(0, dp(26), 1.05f))
+        infoRow.addView(infoFilter, LinearLayout.LayoutParams(0, dp(26), 1f))
+        infoRow.addView(valueFormat, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(26)))
+        infoRow.addView(foundCount, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(26)))
+        infoRow.addView(infoMenu, LinearLayout.LayoutParams(dp(32), dp(26)))
+        infoRow.addView(infoRefresh, LinearLayout.LayoutParams(dp(32), dp(26)))
+        mainColumn.addView(infoRow)
+        mainColumn.addView(divider())
+
+        val content = android.widget.FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+        mainColumn.addView(content)
+        val statusBar = TextView(this).apply {
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            textSize = 9f
+            text = "GG-AI  +  Ch,Jh,Ca,Cd,Cb,A,S,O"
+            maxLines = 1
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(18)).apply { marginEnd = dp(60) }
+        }
+        mainColumn.addView(statusBar)
+
+        fun toolbarAction(icon: Int, action: () -> Unit) {
+            toolbar.addView(iconView(icon, 48, 12, action), LinearLayout.LayoutParams(dp(48), dp(48)))
+        }
+
+        fun sectionTitle(parent: LinearLayout, title: String) {
+            parent.addView(TextView(this).apply {
+                text = title
+                setTextColor(Color.parseColor("#FFB8B8B8"))
+                textSize = 10f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                setPadding(dp(8), dp(8), dp(8), dp(4))
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+
+        fun actionRow(parent: LinearLayout, title: String, summary: String = "", action: () -> Unit) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(10), dp(3), dp(6), dp(3))
+                background = GradientDrawable().apply {
+                    setColor(Color.argb(18, 255, 255, 255))
+                    setStroke(dp(0), Color.TRANSPARENT)
+                }
+                setOnClickListener { action() }
+            }
+            row.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(TextView(this@OverlayService).apply {
+                    text = title
+                    setTextColor(Color.WHITE)
+                    textSize = 12f
+                    maxLines = 1
+                })
+                if (summary.isNotBlank()) addView(TextView(this@OverlayService).apply {
+                    text = summary
+                    setTextColor(Color.parseColor("#FFB8B8B8"))
+                    textSize = 9f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                })
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(TextView(this).apply {
+                text = "›"
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                textSize = 18f
+            }, LinearLayout.LayoutParams(dp(32), LinearLayout.LayoutParams.MATCH_PARENT))
+            parent.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(if (summary.isBlank()) 44 else 52)))
+            parent.addView(divider())
+        }
+
+        fun emptyHint(text: String): TextView = TextView(this).apply {
+            this.text = text
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            setPadding(dp(16), dp(24), dp(16), dp(24))
+        }
+
+        fun renderConfigPage() {
+            val holder = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            val scroll = ScrollView(this).apply {
+                isFillViewport = true
+                addView(holder)
+            }
+            sectionTitle(holder, "操作")
+            actionRow(holder, "选择应用进程", if (pid != null) "$displayName · PID $pid" else "点击选择正在运行的目标") { showProcessPanel() }
+            actionRow(holder, "进程控制", "暂停、恢复、切换或结束目标进程") { showProcessControlPanel() }
+            actionRow(holder, "退出", "收起主悬浮窗并保留悬浮球") { closePanel() }
+            sectionTitle(holder, "游戏")
+            actionRow(holder, "内存范围", MemoryEngine.getSelectedRegionCategories().joinToString(", ").ifBlank { "全部可读写区域" }) { showRegionPanel() }
+            actionRow(holder, "内存工具", "复制内存、转储地址区间") { showMemoryToolsPanel() }
+            actionRow(holder, "保存列表", "冻结与管理已保存地址") { aggMainTab = 2; renderTab(2) }
+            sectionTitle(holder, "界面")
+            actionRow(holder, "悬浮窗设置", "当前尺寸 ${panelW / dm.density.toInt().coerceAtLeast(1)} × ${panelH / dm.density.toInt().coerceAtLeast(1)}") {
+                Toast.makeText(this, "窗口宽高与模糊设置将在下一阶段接入", Toast.LENGTH_SHORT).show()
+            }
+            actionRow(holder, "打开主界面", "进入 GG-AI 完整应用界面") {
+                try { startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
+            }
+            content.addView(scroll, android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+            ))
+        }
+
+        fun renderSearchPage() {
+            if (searchResults.isEmpty()) {
+                content.addView(emptyHint("点击上方放大镜开始搜索\n\n支持精确、模糊、范围、地址与特征码搜索"), android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                ))
+                return
+            }
+            val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val scroll = ScrollView(this).apply { addView(holder) }
+            searchResults.take(250).forEachIndexed { index, item ->
+                val address = (item["addressInt"] as? Number)?.toLong() ?: return@forEachIndexed
+                val addressText = item["address"]?.toString() ?: "0x${address.toString(16).uppercase()}"
+                val value = item["value"]?.toString() ?: "?"
+                val type = item["type"]?.toString() ?: searchDataType
+                val machine = item["machineCode"]?.toString().orEmpty()
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, 0, dp(4), 0)
+                    setOnClickListener { showSearchResultActions(index, item) }
+                    setOnLongClickListener {
+                        copyToClipboard(addressText)
+                        Toast.makeText(this@OverlayService, "已复制 $addressText", Toast.LENGTH_SHORT).show()
+                        true
+                    }
+                }
+                row.addView(android.widget.CheckBox(this).apply {
+                    isChecked = index in selectedIndices
+                    buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+                    setOnCheckedChangeListener { _, checked -> if (checked) selectedIndices.add(index) else selectedIndices.remove(index) }
+                }, LinearLayout.LayoutParams(dp(42), dp(48)))
+                row.addView(LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(TextView(this@OverlayService).apply {
+                        text = addressText
+                        setTextColor(Color.WHITE)
+                        textSize = 10f
+                        typeface = android.graphics.Typeface.MONOSPACE
+                    })
+                    addView(TextView(this@OverlayService).apply {
+                        text = listOf(type.uppercase(), machine).filter { it.isNotBlank() }.joinToString("  ")
+                        setTextColor(Color.parseColor("#FFB8B8B8"))
+                        textSize = 8f
+                        maxLines = 1
+                    })
+                }, LinearLayout.LayoutParams(0, dp(48), 1f))
+                row.addView(TextView(this).apply {
+                    text = value
+                    gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                    setTextColor(Color.WHITE)
+                    textSize = 11f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.START
+                }, LinearLayout.LayoutParams(0, dp(48), 0.85f))
+                holder.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
+                holder.addView(divider())
+            }
+            content.addView(scroll, android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+            ))
+        }
+
+        fun renderSavedPage() {
+            val items = loadSavedMemoryItems()
+            if (items.isEmpty()) {
+                content.addView(emptyHint("保存列表为空"), android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                ))
+                return
+            }
+            val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val scroll = ScrollView(this).apply { addView(holder) }
+            items.forEach { item ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, 0, dp(4), 0)
+                    setOnClickListener { showSavedFreezeSettingsPanel(item) }
+                    setOnLongClickListener { showRenameSavedItemPanel(item); true }
+                }
+                row.addView(ImageView(this).apply {
+                    setImageResource(R.drawable.ic_agg_lock)
+                    setColorFilter(if (item.freeze) Color.parseColor("#FF80CBC4") else Color.WHITE)
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                }, LinearLayout.LayoutParams(dp(48), dp(48)))
+                row.addView(LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(TextView(this@OverlayService).apply {
+                        text = item.label.ifBlank { "${item.type.uppercase()} @ 0x${item.address.toString(16).uppercase()}" }
+                        setTextColor(Color.WHITE)
+                        textSize = 10f
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                    })
+                    addView(TextView(this@OverlayService).apply {
+                        text = "0x${item.address.toString(16).uppercase()}  ${item.type.uppercase()}"
+                        setTextColor(Color.parseColor("#FFB8B8B8"))
+                        textSize = 8f
+                        typeface = android.graphics.Typeface.MONOSPACE
+                    })
+                }, LinearLayout.LayoutParams(0, dp(48), 1f))
+                row.addView(TextView(this).apply {
+                    text = item.lastValue
+                    gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                    setTextColor(if (item.freeze) Color.parseColor("#FF80CBC4") else Color.WHITE)
+                    textSize = 10f
+                    maxLines = 1
+                }, LinearLayout.LayoutParams(0, dp(48), 0.7f))
+                holder.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
+                holder.addView(divider())
+            }
+            content.addView(scroll, android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+            ))
+        }
+
+        fun renderMemoryPage() {
+            if (pid == null) {
+                content.addView(emptyHint("请先选择目标进程"), android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                ))
+                return
+            }
+            if (memoryEditorAddress <= 0L) {
+                memoryEditorAddress = (MemoryEngine.getMemoryRegions().firstOrNull()?.get("startAddress") as? Number)?.toLong() ?: 1L
+            }
+            val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val status = TextView(this).apply {
+                text = "正在读取 0x${memoryEditorAddress.toString(16).uppercase()}"
+                setTextColor(Color.WHITE)
+                textSize = 9f
+                setPadding(dp(8), dp(5), dp(8), dp(5))
+            }
+            holder.addView(status)
+            val rowsHolder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val scroll = ScrollView(this).apply { addView(rowsHolder) }
+            holder.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+            content.addView(holder, android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+            ))
+            Thread {
+                val rows = MemoryEngine.readMemoryWindow(memoryEditorAddress, if (isLandscape) 28 else 18, memoryEditorType)
+                handler.post {
+                    if (panel !== root || aggMainTab != 3) return@post
+                    rowsHolder.removeAllViews()
+                    if (rows.isEmpty()) {
+                        rowsHolder.addView(emptyHint("该地址不可读"))
+                        status.text = "读取失败"
+                        return@post
+                    }
+                    status.text = "${rows.first()["address"]} — ${rows.last()["address"]}  ·  ${memoryEditorType.uppercase()}"
+                    rows.forEach { item ->
+                        val address = (item["addressInt"] as? Number)?.toLong() ?: return@forEach
+                        val addressText = item["address"]?.toString() ?: "0x${address.toString(16).uppercase()}"
+                        val value = item["value"]
+                        val machine = item["machineCode"]?.toString().orEmpty()
+                        val row = LinearLayout(this).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(dp(8), 0, dp(8), 0)
+                            setOnClickListener {
+                                showWriteDialog(addressText, value, machine, memoryEditorType, returnAction = {
+                                    aggMainTab = 3
+                                    showMainMenu()
+                                })
+                            }
+                        }
+                        row.addView(TextView(this).apply {
+                            text = addressText
+                            setTextColor(Color.WHITE)
+                            textSize = 9f
+                            typeface = android.graphics.Typeface.MONOSPACE
+                        }, LinearLayout.LayoutParams(0, dp(42), 1.1f))
+                        row.addView(TextView(this).apply {
+                            text = value?.toString() ?: "?"
+                            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                            setTextColor(Color.WHITE)
+                            textSize = 10f
+                            maxLines = 1
+                        }, LinearLayout.LayoutParams(0, dp(42), 0.8f))
+                        row.addView(TextView(this).apply {
+                            text = machine
+                            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                            setTextColor(Color.parseColor("#FFB8B8B8"))
+                            textSize = 8f
+                            typeface = android.graphics.Typeface.MONOSPACE
+                            maxLines = 1
+                        }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(6) })
+                        rowsHolder.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)))
+                        rowsHolder.addView(divider())
+                    }
+                }
+            }.start()
+        }
+
+        fun renderDebugPage() {
+            val holder = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(18), dp(18), dp(18), dp(18))
+            }
+            holder.addView(ImageView(this).apply {
+                setImageResource(R.drawable.ic_dbg)
+                setColorFilter(Color.WHITE)
+                setPadding(dp(12), dp(12), dp(12), dp(12))
+            }, LinearLayout.LayoutParams(dp(64), dp(64)))
+            holder.addView(TextView(this).apply {
+                text = "断点列表为空"
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                textSize = 13f
+                setPadding(0, dp(6), 0, dp(4))
+            })
+            holder.addView(TextView(this).apply {
+                text = "架构：${Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"}\n断点、寄存器与反汇编功能尚未接入"
+                gravity = Gravity.CENTER
+                setTextColor(Color.parseColor("#FFB8B8B8"))
+                textSize = 10f
+            })
+            content.addView(holder, android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+            ))
+        }
+
+        renderTab = { requested ->
+            aggMainTab = requested.coerceIn(0, 4)
+            tabViews.forEachIndexed { index, view -> view.background = tabBackground(index == aggMainTab) }
+            toolbar.removeAllViews()
+            content.removeAllViews()
+            when (aggMainTab) {
+                0 -> {
+                    infoFilter.text = "配置"
+                    valueFormat.visibility = View.GONE
+                    foundCount.text = ""
+                    toolbarAction(R.drawable.ic_tune_white_24dp) { showProcessPanel() }
+                    toolbarAction(R.drawable.ic_refresh_white_18dp) { renderTab(0) }
+                    renderConfigPage()
+                    statusBar.text = "配置  ·  进程、范围与界面设置"
+                }
+                1 -> {
+                    infoFilter.text = if (searchResultFilter.isBlank()) "无过滤器" else searchResultFilter
+                    valueFormat.visibility = View.VISIBLE
+                    foundCount.text = "(${searchResults.size})"
+                    toolbarAction(R.drawable.ic_magnify_white_24dp) { showSearchPanel() }
+                    toolbarAction(R.drawable.ic_agg_select_all) {
+                        selectedIndices.clear()
+                        selectedIndices.addAll(searchResults.indices)
+                        renderTab(1)
+                    }
+                    toolbarAction(R.drawable.ic_refresh_white_18dp) {
+                        if (searchResults.isEmpty()) showSearchPanel() else {
+                            Thread {
+                                val refreshed = searchResults.map { item ->
+                                    val address = (item["addressInt"] as? Number)?.toLong()
+                                    val type = item["type"]?.toString() ?: searchDataType
+                                    if (address == null) item else item.toMutableMap().apply {
+                                        MemoryEngine.readMemory(address, type)?.let { put("value", it) }
+                                    }
+                                }
+                                handler.post {
+                                    searchResults = refreshed
+                                    if (panel === root) renderTab(1)
+                                }
+                            }.start()
+                        }
+                    }
+                    renderSearchPage()
+                    statusBar.text = "搜索  ·  ${searchResults.size} 个结果"
+                }
+                2 -> {
+                    val count = loadSavedMemoryItems().size
+                    infoFilter.text = "保存列表"
+                    valueFormat.visibility = View.VISIBLE
+                    foundCount.text = "($count)"
+                    toolbarAction(R.drawable.ic_content_save_white_24dp) { showSavedListPanel() }
+                    toolbarAction(R.drawable.ic_refresh_white_18dp) { renderTab(2) }
+                    renderSavedPage()
+                    statusBar.text = "保存  ·  $count 个地址"
+                }
+                3 -> {
+                    infoFilter.text = "0x${memoryEditorAddress.coerceAtLeast(0L).toString(16).uppercase()}"
+                    valueFormat.visibility = View.VISIBLE
+                    foundCount.text = ""
+                    toolbarAction(R.drawable.ic_format_list_bulleted_white_24dp) { showMemoryEditorPanel() }
+                    toolbarAction(R.drawable.ic_refresh_white_18dp) { renderTab(3) }
+                    renderMemoryPage()
+                    statusBar.text = "内存编辑器  ·  ${memoryEditorType.uppercase()}"
+                }
+                else -> {
+                    infoFilter.text = "断点"
+                    valueFormat.visibility = View.GONE
+                    foundCount.text = "(0)"
+                    toolbarAction(R.drawable.ic_dbg) { Toast.makeText(this, "断点功能尚未接入", Toast.LENGTH_SHORT).show() }
+                    toolbarAction(R.drawable.ic_refresh_white_18dp) { renderTab(4) }
+                    renderDebugPage()
+                    statusBar.text = "断点  ·  ${Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"}"
+                }
+            }
+        }
 
         val params = WindowManager.LayoutParams(
             panelW,
@@ -953,7 +1650,8 @@ class OverlayService : Service() {
         try {
             wm?.addView(panel, params)
             activePanel = "menu"
-            enableCompactPanelDrag(header, params, panelW, panelH)
+            enableCompactPanelDrag(appFrame, params, panelW, panelH)
+            renderTab(aggMainTab)
             panel?.animate()?.alpha(1f)?.scaleX(1f)?.scaleY(1f)?.setDuration(120L)?.start()
             oldPanel?.let { old -> handler.postDelayed({ try { wm?.removeView(old) } catch (_: Exception) {} }, 24L) }
         } catch (_: Exception) {
