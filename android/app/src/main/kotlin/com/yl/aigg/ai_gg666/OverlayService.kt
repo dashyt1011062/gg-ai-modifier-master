@@ -5487,7 +5487,7 @@ class OverlayService : Service() {
                         MemoryEngine.searchAob(raw, maskInput.text.toString().trim().takeIf { it.isNotBlank() })
                     }
                     "地址" -> {
-                        val base = parseAddress(raw)
+                        val base = parseAggAddress(raw)
                         if (base == null) {
                             message.text = "地址格式不正确"
                             message.setTextColor(Color.parseColor("#FFB4AB"))
