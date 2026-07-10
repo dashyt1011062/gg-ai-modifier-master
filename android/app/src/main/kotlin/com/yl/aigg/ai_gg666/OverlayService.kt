@@ -7754,7 +7754,7 @@ class OverlayService : Service() {
             val code = (pair[0].toInt() and 0xFF) or ((pair[1].toInt() and 0xFF) shl 8)
             if (code in 32..126) code.toChar() else '.'
         }.joinToString("")
-        return "J:"$chars";"
+        return "J:\"$chars\";"
     }
 
     private fun aggDefaultNumericPreview(bytes: ByteArray, rawValue: Any?, type: String): String {
