@@ -6905,8 +6905,7 @@ class OverlayService : Service() {
                     val name = region["name"]?.toString()?.ifBlank { "[anon]" } ?: "[anon]"
                     val sizeKb = ((end - start) / 1024L).coerceAtLeast(1L)
                     list.addView(TextView(this).apply {
-                        text = "$permissions  ${sizeKb}K  $name
-${start.toString(16).uppercase()}-${end.toString(16).uppercase()}"
+                        text = "$permissions  ${sizeKb}K  $name\n${start.toString(16).uppercase()}-${end.toString(16).uppercase()}"
                         setTextColor(Color.WHITE)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                         typeface = android.graphics.Typeface.MONOSPACE
