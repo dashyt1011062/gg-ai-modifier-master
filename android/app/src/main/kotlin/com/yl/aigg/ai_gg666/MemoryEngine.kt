@@ -321,6 +321,8 @@ object MemoryEngine {
 
     fun getSelectedRegionCategories(): Set<String> = selectedRegionCategories.toSet()
 
+    fun getRegionCategoryIds(): Set<String> = regionCategoryLabels.keys.toSet()
+
     fun getCustomRange(): Pair<Long?, Long?> = customRangeFrom to customRangeTo
 
     @Synchronized
@@ -387,8 +389,15 @@ object MemoryEngine {
         return true
     }
 
-    fun getMemoryRegions(): List<Map<String, Any>> {
-        return activeRegions.map { r ->
+    fun getMemoryRegions(): List<Map<String, Any>> = regionsToMaps(activeRegions)
+
+    fun getAllMemoryRegions(): List<Map<String, Any>> {
+        val pid = attachedPid ?: return emptyList()
+        return regionsToMaps(readRegions(pid, applySelection = false))
+    }
+
+    private fun regionsToMaps(regions: List<MemRegion>): List<Map<String, Any>> {
+        return regions.map { r ->
             mapOf(
                 "startAddress" to r.startAddr,
                 "endAddress" to r.endAddr,

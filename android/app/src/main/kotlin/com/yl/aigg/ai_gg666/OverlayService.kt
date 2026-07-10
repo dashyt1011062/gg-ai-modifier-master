@@ -108,6 +108,10 @@ class OverlayService : Service() {
     private val selectedMemoryAddresses = mutableSetOf<Long>()
     // 搜索输入框的值（保持不丢失）
     private var savedSearchInput = ""
+    private var savedAddressSearchInput = ""
+    private var savedAddressOffsetInput = ""
+    private var savedMachineSearchInput = ""
+    private var savedMachineMaskInput = ""
     private var savedFilterInput = ""
     private var savedRangeMin = ""
     private var savedRangeMax = ""
@@ -1642,6 +1646,54 @@ class OverlayService : Service() {
         }, 360, 360, onBack = { aggMainTab = 0; showMainMenu() }, titleIcon = R.drawable.ic_gg_48dp)
     }
 
+    private fun showAggTypeFilterPanel() {
+        val prefs = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
+        val typeIds = listOf("dword", "float", "double", "word", "byte", "qword", "xor")
+        val labels = mapOf(
+            "dword" to "Dword (D)",
+            "float" to "Float (F)",
+            "double" to "Double (E)",
+            "word" to "Word (W)",
+            "byte" to "Byte (B)",
+            "qword" to "Qword (Q)",
+            "xor" to "Xor (X)",
+        )
+        val selected = prefs.getStringSet("agg_filter_types", typeIds.toSet())?.toMutableSet() ?: typeIds.toMutableSet()
+        makeDraggablePanel("类型", { content ->
+            content.setPadding(dp(20), dp(20), dp(20), dp(20))
+            typeIds.forEach { type ->
+                content.addView(android.widget.CheckBox(this).apply {
+                    text = labels[type] ?: type
+                    isChecked = type in selected
+                    setTextColor(Color.WHITE)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+                    setOnCheckedChangeListener { _, checked ->
+                        if (checked) selected.add(type) else selected.remove(type)
+                    }
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
+            }
+            val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            fun action(textValue: String, run: () -> Unit): TextView = TextView(this).apply {
+                text = textValue
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                background = aggMenuDrawable(Color.argb(42, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
+                setOnClickListener { run() }
+            }
+            actions.addView(action("全选") {
+                prefs.edit().putStringSet("agg_filter_types", typeIds.toSet()).apply()
+                showAggResultFilterPanel()
+            }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
+            actions.addView(action("应用") {
+                prefs.edit().putStringSet("agg_filter_types", selected.ifEmpty { typeIds.toSet() }).apply()
+                showAggResultFilterPanel()
+            }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(3) })
+            content.addView(actions)
+        }, 360, 500, onBack = { showAggResultFilterPanel() }, titleIcon = R.drawable.ic_filter_white_24dp)
+    }
+
     private fun showAggResultFilterPanel() {
         val prefs = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
         makeDraggablePanel("搜索结果过滤", { content ->
@@ -1667,8 +1719,7 @@ class OverlayService : Service() {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                 setTextColor(Color.WHITE)
                 setHintTextColor(Color.parseColor("#938F99"))
-                setPadding(dp(8), 0, dp(8), 0)
-                background = aggMenuDrawable(Color.argb(34, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
+                setPadding(dp(4), 0, dp(4), 0)
             }
 
             fun divider(): View = View(this).apply {
@@ -1742,57 +1793,107 @@ class OverlayService : Service() {
             val (valueMaxCheck, valueMax) = toggleInputRow("数值 ≤", valueMaxInitial, "最大数值")
             body.addView(divider())
 
-            val types = arrayOf("全部", "dword", "float", "double", "word", "byte", "qword")
-            val storedType = prefs.getString("agg_filter_type", "全部") ?: "全部"
-            val typeSpinner = Spinner(this).apply {
-                adapter = ArrayAdapter(this@OverlayService, android.R.layout.simple_spinner_item, types).apply {
-                    setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-                }
-                setSelection(types.indexOf(storedType).coerceAtLeast(0))
-                background = aggMenuDrawable(Color.argb(34, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
+            val filterTypeIds = listOf("dword", "float", "double", "word", "byte", "qword", "xor")
+            val typeCodes = mapOf("dword" to "D", "float" to "F", "double" to "E", "word" to "W", "byte" to "B", "qword" to "Q", "xor" to "X")
+            val legacyType = prefs.getString("agg_filter_type", "全部") ?: "全部"
+            val storedTypes = prefs.getStringSet("agg_filter_types", null)?.toSet()
+                ?: if (legacyType != "全部") setOf(legacyType) else filterTypeIds.toSet()
+            val typeButton = TextView(this).apply {
+                text = filterTypeIds.filter { it in storedTypes }.joinToString(",") { typeCodes[it] ?: it }.ifBlank { "D,F,E,W,B,Q,X" }
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                minWidth = dp(48)
+                background = aggMenuDrawable(Color.argb(42, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
+                setOnClickListener { showAggTypeFilterPanel() }
             }
             val typeCheck = android.widget.CheckBox(this).apply {
                 text = "类型："
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                isChecked = storedType != "全部"
+                isChecked = prefs.getBoolean("agg_filter_type_enabled", legacyType != "全部")
                 buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
                 setOnCheckedChangeListener { _, checked ->
-                    typeSpinner.isEnabled = checked
-                    typeSpinner.alpha = if (checked) 1f else 0.45f
+                    typeButton.isEnabled = checked
+                    typeButton.alpha = if (checked) 1f else 0.45f
+                    prefs.edit().putBoolean("agg_filter_type_enabled", checked).apply()
                 }
             }
-            typeSpinner.isEnabled = typeCheck.isChecked
-            typeSpinner.alpha = if (typeCheck.isChecked) 1f else 0.45f
+            typeButton.isEnabled = typeCheck.isChecked
+            typeButton.alpha = if (typeCheck.isChecked) 1f else 0.45f
             body.addView(LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 addView(typeCheck, LinearLayout.LayoutParams(dp(92), dp(48)))
-                addView(typeSpinner, LinearLayout.LayoutParams(0, dp(48), 1f))
+                addView(typeButton, LinearLayout.LayoutParams(0, dp(48), 1f))
             })
 
-            fun unsupportedChoice(label: String, summary: String): LinearLayout {
-                return LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    alpha = 0.48f
-                    addView(android.widget.CheckBox(this@OverlayService).apply {
-                        text = label
-                        setTextColor(Color.WHITE)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                        isEnabled = false
-                        buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-                    }, LinearLayout.LayoutParams(dp(92), dp(48)))
-                    addView(TextView(this@OverlayService).apply {
-                        text = summary
-                        setTextColor(Color.parseColor("#CAC4D0"))
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                        gravity = Gravity.CENTER_VERTICAL
-                    }, LinearLayout.LayoutParams(0, dp(48), 1f))
+            val fractionalCheck = android.widget.CheckBox(this).apply {
+                text = "小数位"
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                isChecked = prefs.getBoolean("agg_filter_fraction_enabled", false)
+                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            }
+            val fractionalOps = arrayOf("=", "≠", ">", "<")
+            val fractionalSpinner = Spinner(this).apply {
+                adapter = ArrayAdapter(this@OverlayService, android.R.layout.simple_spinner_item, fractionalOps).apply {
+                    setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+                }
+                setSelection(prefs.getInt("agg_filter_fraction_op", 0).coerceIn(fractionalOps.indices))
+                background = aggMenuDrawable(Color.argb(42, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
+            }
+            val fractionalInput = field(prefs.getString("agg_filter_fraction_value", "0") ?: "0", "0")
+            fun updateFractionEnabled() {
+                fractionalSpinner.isEnabled = fractionalCheck.isChecked
+                fractionalInput.isEnabled = fractionalCheck.isChecked
+                val alpha = if (fractionalCheck.isChecked) 1f else 0.45f
+                fractionalSpinner.alpha = alpha
+                fractionalInput.alpha = alpha
+            }
+            fractionalCheck.setOnCheckedChangeListener { _, _ -> updateFractionEnabled() }
+            body.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(fractionalCheck, LinearLayout.LayoutParams(dp(92), dp(48)))
+                addView(fractionalSpinner, LinearLayout.LayoutParams(dp(48), dp(48)))
+                addView(fractionalInput, LinearLayout.LayoutParams(0, dp(48), 1f))
+            })
+            updateFractionEnabled()
+
+            val pointerModes = arrayOf("-", "RO", "W", "X", "WX")
+            var pointerModeIndex = pointerModes.indexOf(prefs.getString("agg_filter_pointer_mode", "-") ?: "-").coerceAtLeast(0)
+            val pointerButton = TextView(this).apply {
+                text = pointerModes[pointerModeIndex]
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                minWidth = dp(48)
+                background = aggMenuDrawable(Color.argb(42, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
+                setOnClickListener {
+                    pointerModeIndex = (pointerModeIndex + 1) % pointerModes.size
+                    text = pointerModes[pointerModeIndex]
                 }
             }
-            body.addView(unsupportedChoice("{x}", "小数位过滤暂不可用"))
-            body.addView(unsupportedChoice("指针：", "指针权限过滤暂不可用"))
+            val pointerCheck = android.widget.CheckBox(this).apply {
+                text = "指针："
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                isChecked = prefs.getBoolean("agg_filter_pointer_enabled", false)
+                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+                setOnCheckedChangeListener { _, checked ->
+                    pointerButton.isEnabled = checked
+                    pointerButton.alpha = if (checked) 1f else 0.45f
+                }
+            }
+            pointerButton.isEnabled = pointerCheck.isChecked
+            pointerButton.alpha = if (pointerCheck.isChecked) 1f else 0.45f
+            body.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(pointerCheck, LinearLayout.LayoutParams(dp(92), dp(48)))
+                addView(pointerButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48)))
+            })
             body.addView(divider())
 
             val showHex = android.widget.CheckBox(this).apply {
@@ -1823,16 +1924,16 @@ class OverlayService : Service() {
                 isChecked = prefs.getBoolean("agg_show_java_string", false)
                 buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
             }
-            fun asmCheck(label: String): android.widget.CheckBox = android.widget.CheckBox(this).apply {
+            fun asmCheck(label: String, key: String): android.widget.CheckBox = android.widget.CheckBox(this).apply {
                 text = label
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                isChecked = prefs.getBoolean("agg_show_machine", false)
+                isChecked = prefs.getBoolean(key, prefs.getBoolean("agg_show_machine", false))
                 buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
             }
-            val showArm = asmCheck("ARM 操作码")
-            val showThumb = asmCheck("Thumb 操作码")
-            val showArm8 = asmCheck("ARM8 操作码")
+            val showArm = asmCheck("ARM 操作码", "agg_show_arm")
+            val showThumb = asmCheck("Thumb 操作码", "agg_show_thumb")
+            val showArm8 = asmCheck("ARM8 操作码", "agg_show_arm8")
             body.addView(showHex, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
             body.addView(showReverseHex, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
             body.addView(showString, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
@@ -1861,11 +1962,20 @@ class OverlayService : Service() {
                     .remove("agg_filter_value_max")
                     .putInt("agg_filter_max_show", 250)
                     .putString("agg_filter_type", "全部")
+                    .putBoolean("agg_filter_type_enabled", false)
+                    .putStringSet("agg_filter_types", filterTypeIds.toSet())
+                    .putBoolean("agg_filter_fraction_enabled", false)
+                    .putString("agg_filter_fraction_value", "0")
+                    .putBoolean("agg_filter_pointer_enabled", false)
+                    .putString("agg_filter_pointer_mode", "-")
                     .putBoolean("agg_show_hex", true)
                     .putBoolean("agg_show_reverse_hex", false)
                     .putBoolean("agg_show_string", false)
                     .putBoolean("agg_show_java_string", false)
                     .putBoolean("agg_show_machine", false)
+                    .putBoolean("agg_show_arm", false)
+                    .putBoolean("agg_show_thumb", false)
+                    .putBoolean("agg_show_arm8", false)
                     .apply()
                 searchResultFilter = ""
                 aggMainTab = 1
@@ -1879,12 +1989,22 @@ class OverlayService : Service() {
                     .putString("agg_filter_addr_max", if (addrMaxCheck.isChecked) addrMax.text.toString().trim() else "")
                     .putString("agg_filter_value_min", if (valueMinCheck.isChecked) valueMin.text.toString().trim() else "")
                     .putString("agg_filter_value_max", if (valueMaxCheck.isChecked) valueMax.text.toString().trim() else "")
-                    .putString("agg_filter_type", if (typeCheck.isChecked) types[typeSpinner.selectedItemPosition] else "全部")
+                    .putString("agg_filter_type", "全部")
+                    .putBoolean("agg_filter_type_enabled", typeCheck.isChecked)
+                    .putStringSet("agg_filter_types", storedTypes)
+                    .putBoolean("agg_filter_fraction_enabled", fractionalCheck.isChecked)
+                    .putInt("agg_filter_fraction_op", fractionalSpinner.selectedItemPosition.coerceIn(fractionalOps.indices))
+                    .putString("agg_filter_fraction_value", fractionalInput.text.toString().trim().ifBlank { "0" })
+                    .putBoolean("agg_filter_pointer_enabled", pointerCheck.isChecked)
+                    .putString("agg_filter_pointer_mode", pointerModes[pointerModeIndex])
                     .putBoolean("agg_show_hex", showHex.isChecked)
                     .putBoolean("agg_show_reverse_hex", showReverseHex.isChecked)
                     .putBoolean("agg_show_string", showString.isChecked)
                     .putBoolean("agg_show_java_string", showJava.isChecked)
                     .putBoolean("agg_show_machine", showArm.isChecked || showThumb.isChecked || showArm8.isChecked)
+                    .putBoolean("agg_show_arm", showArm.isChecked)
+                    .putBoolean("agg_show_thumb", showThumb.isChecked)
+                    .putBoolean("agg_show_arm8", showArm8.isChecked)
                     .apply()
                 searchResultFilter = ""
                 aggMainTab = 1
@@ -2087,7 +2207,7 @@ class OverlayService : Service() {
         val toolbarMore = iconView(R.drawable.ic_menu_white_24dp, 45, 12) {
             when (aggMainTab) {
                 0 -> showAggInterfaceSettingsPanel()
-                1 -> showAggResultFilterPanel()
+                1 -> showAggSearchMorePanel()
                 2 -> showSavedListPanel()
                 3 -> showMemoryEditorPanel()
                 else -> showAggDebugAddPanel()
@@ -2167,7 +2287,44 @@ class OverlayService : Service() {
                 else -> showAggDebugAddPanel()
             }
         }
-        val infoRefresh = iconView(R.drawable.ic_refresh_white_18dp, 32, 7) { renderTab(aggMainTab) }
+        val infoRefresh = iconView(R.drawable.ic_refresh_white_18dp, 32, 7) {
+            when (aggMainTab) {
+                1 -> {
+                    if (searchResults.isEmpty()) {
+                        showAggSearchDialog("exact")
+                    } else {
+                        Thread {
+                            val refreshed = searchResults.map { item ->
+                                val address = (item["addressInt"] as? Number)?.toLong()
+                                val type = item["type"]?.toString() ?: searchDataType
+                                if (address == null) item else item.toMutableMap().apply {
+                                    MemoryEngine.readMemory(address, type)?.let { put("value", it) }
+                                }
+                            }
+                            handler.post {
+                                searchResults = refreshed
+                                if (panel === root && aggMainTab == 1) renderTab(1)
+                            }
+                        }.start()
+                    }
+                }
+                2 -> {
+                    val items = loadSavedMemoryItems()
+                    if (items.isEmpty() || pid == null) renderTab(2) else Thread {
+                        val refreshed = items.map { item ->
+                            val current = MemoryEngine.readMemory(item.address, item.type)?.toString()
+                            if (current == null) item else item.copy(
+                                lastValue = current,
+                                freeze = MemoryFreezer.isFrozen(item.address),
+                            )
+                        }
+                        persistSavedMemoryItems(refreshed)
+                        handler.post { if (panel === root && aggMainTab == 2) renderTab(2) }
+                    }.start()
+                }
+                else -> renderTab(aggMainTab)
+            }
+        }
         infoRow.addView(pauseButton, LinearLayout.LayoutParams(dp(32), dp(26)))
         infoRow.addView(appNameText, LinearLayout.LayoutParams(0, dp(26), 1.05f))
         infoRow.addView(infoFilter, LinearLayout.LayoutParams(0, dp(26), 1f))
@@ -2486,8 +2643,29 @@ class OverlayService : Service() {
             val maxAddress = parseAggAddress(prefs.getString("agg_filter_addr_max", "") ?: "")
             val minValue = prefs.getString("agg_filter_value_min", "")?.toDoubleOrNull()
             val maxValue = prefs.getString("agg_filter_value_max", "")?.toDoubleOrNull()
-            val typeFilter = prefs.getString("agg_filter_type", "全部") ?: "全部"
+            val legacyTypeFilter = prefs.getString("agg_filter_type", "全部") ?: "全部"
+            val typeFilterEnabled = prefs.getBoolean("agg_filter_type_enabled", legacyTypeFilter != "全部")
+            val typeFilters = prefs.getStringSet("agg_filter_types", null)?.toSet()
+                ?: if (legacyTypeFilter != "全部") setOf(legacyTypeFilter) else emptySet()
+            val fractionalEnabled = prefs.getBoolean("agg_filter_fraction_enabled", false)
+            val fractionalOperator = prefs.getInt("agg_filter_fraction_op", 0).coerceIn(0, 3)
+            val fractionalTarget = prefs.getString("agg_filter_fraction_value", "0")?.toDoubleOrNull() ?: 0.0
+            val pointerEnabled = prefs.getBoolean("agg_filter_pointer_enabled", false)
+            val pointerMode = prefs.getString("agg_filter_pointer_mode", "-") ?: "-"
+            val showArm = prefs.getBoolean("agg_show_arm", prefs.getBoolean("agg_show_machine", false))
+            val showThumb = prefs.getBoolean("agg_show_thumb", prefs.getBoolean("agg_show_machine", false))
+            val showArm8 = prefs.getBoolean("agg_show_arm8", prefs.getBoolean("agg_show_machine", false))
             val keyword = searchResultFilter.trim().lowercase()
+
+            fun compareDecimal(actual: Double, target: Double, operator: Int): Boolean {
+                val epsilon = 0.0000001
+                return when (operator) {
+                    0 -> kotlin.math.abs(actual - target) <= epsilon
+                    1 -> kotlin.math.abs(actual - target) > epsilon
+                    2 -> actual > target
+                    else -> actual < target
+                }
+            }
 
             val filtered = searchResults.withIndex().filter { indexed ->
                 val item = indexed.value
@@ -2498,7 +2676,33 @@ class OverlayService : Service() {
                 if (maxAddress != null && address > maxAddress) return@filter false
                 if (minValue != null && (numeric == null || numeric < minValue)) return@filter false
                 if (maxValue != null && (numeric == null || numeric > maxValue)) return@filter false
-                if (typeFilter != "全部" && type != typeFilter) return@filter false
+                if (typeFilterEnabled && typeFilters.isNotEmpty() && type !in typeFilters) return@filter false
+                if (fractionalEnabled) {
+                    if (numeric == null) return@filter false
+                    val fractional = kotlin.math.abs(numeric % 1.0)
+                    if (!compareDecimal(fractional, fractionalTarget, fractionalOperator)) return@filter false
+                }
+                if (pointerEnabled) {
+                    val pointerTarget = (item["pointerTarget"] as? Number)?.toLong()
+                    if (pointerMode == "-") {
+                        if (pointerTarget != null) return@filter false
+                    } else {
+                        if (pointerTarget == null) return@filter false
+                        val permissions = regions.firstOrNull { region ->
+                            val start = (region["startAddress"] as? Number)?.toLong() ?: return@firstOrNull false
+                            val end = (region["endAddress"] as? Number)?.toLong() ?: return@firstOrNull false
+                            pointerTarget >= start && pointerTarget < end
+                        }?.get("permissions")?.toString().orEmpty()
+                        val matchesPointerMode = when (pointerMode) {
+                            "RO" -> permissions.contains('r') && !permissions.contains('w') && !permissions.contains('x')
+                            "W" -> permissions.contains('w') && !permissions.contains('x')
+                            "X" -> permissions.contains('x') && !permissions.contains('w')
+                            "WX" -> permissions.contains('w') && permissions.contains('x')
+                            else -> true
+                        }
+                        if (!matchesPointerMode) return@filter false
+                    }
+                }
                 if (keyword.isNotBlank()) {
                     val searchable = listOf(
                         item["address"], item["value"], item["type"], item["machineCode"],
@@ -2621,10 +2825,10 @@ class OverlayService : Service() {
                 if (showMachine && machine.isNotBlank()) {
                     val arm64 = Build.SUPPORTED_ABIS.firstOrNull()?.contains("arm64", ignoreCase = true) == true
                     if (arm64) {
-                        values.addView(token("A8:$machine;", Color.parseColor("#FFAAFF")))
+                        if (showArm8) values.addView(token("A8:$machine;", Color.parseColor("#FFAAFF")))
                     } else {
-                        values.addView(token("A:$machine;", Color.parseColor("#FFAAFF")))
-                        values.addView(token("T:$machine;", Color.parseColor("#FF00FF")))
+                        if (showArm) values.addView(token("A:$machine;", Color.parseColor("#FFAAFF")))
+                        if (showThumb) values.addView(token("T:$machine;", Color.parseColor("#FF00FF")))
                     }
                 }
                 val pointerExpression = item["pointerExpression"]?.toString().orEmpty()
@@ -3174,7 +3378,9 @@ class OverlayService : Service() {
                             !prefs.getString("agg_filter_addr_max", "").isNullOrBlank() ||
                             !prefs.getString("agg_filter_value_min", "").isNullOrBlank() ||
                             !prefs.getString("agg_filter_value_max", "").isNullOrBlank() ||
-                            (prefs.getString("agg_filter_type", "全部") ?: "全部") != "全部"
+                            prefs.getBoolean("agg_filter_type_enabled", (prefs.getString("agg_filter_type", "全部") ?: "全部") != "全部") ||
+                            prefs.getBoolean("agg_filter_fraction_enabled", false) ||
+                            prefs.getBoolean("agg_filter_pointer_enabled", false)
                     infoFilter.text = if (hasAdvancedFilter) "已启用过滤器" else "无过滤器"
                     valueFormat.visibility = View.VISIBLE
                     valueFormat.text = currentValueFormatText()
@@ -3183,12 +3389,9 @@ class OverlayService : Service() {
                         .filter { it in searchResults.indices }
                         .map { searchResults[it] }
                     // 原版搜索工具栏顺序：已知值搜索、变化搜索、附近搜索、编辑、保存、筛选、选择。
-                    toolbarAction(R.drawable.ic_search_selected_white_24dp) { showAggSearchDialog() }
-                    toolbarAction(R.drawable.ic_search_changed_white_24dp) {
-                        currentSearchMode = "exact"
-                        showAggSearchDialog()
-                    }
-                    toolbarAction(R.drawable.ic_search_nearby_white_24dp) { showRegionPanel() }
+                    toolbarAction(R.drawable.ic_search_selected_white_24dp) { showAggSearchDialog("exact") }
+                    toolbarAction(R.drawable.ic_search_changed_white_24dp) { showAggSearchDialog("fuzzy") }
+                    toolbarAction(R.drawable.ic_search_nearby_white_24dp) { showAggSearchDialog("nearby") }
                     toolbarAction(R.drawable.ic_agg_edit) {
                         val selected = selectedResults()
                         when (selected.size) {
@@ -3257,23 +3460,6 @@ class OverlayService : Service() {
                     toolbarAction(R.drawable.ic_select_off_white_24dp) {
                         selectedIndices.clear()
                         renderTab(1)
-                    }
-                    toolbarAction(R.drawable.ic_refresh_white_18dp) {
-                        if (searchResults.isEmpty()) showAggSearchDialog() else {
-                            Thread {
-                                val refreshed = searchResults.map { item ->
-                                    val address = (item["addressInt"] as? Number)?.toLong()
-                                    val type = item["type"]?.toString() ?: searchDataType
-                                    if (address == null) item else item.toMutableMap().apply {
-                                        MemoryEngine.readMemory(address, type)?.let { put("value", it) }
-                                    }
-                                }
-                                handler.post {
-                                    searchResults = refreshed
-                                    if (panel === root) renderTab(1)
-                                }
-                            }.start()
-                        }
                     }
                     renderSearchPage()
                     statusBar.text = "搜索  ·  ${searchResults.size} 个结果  ·  已选 ${selectedIndices.size}"
@@ -5714,9 +5900,9 @@ class OverlayService : Service() {
         showMainMenu()
     }
 
-    private fun showAggSearchDialog() {
-        // 主工具栏放大镜始终打开原版“已知值 + 未知值”搜索器。
-        currentSearchMode = "exact"
+    private fun showAggSearchDialog(mode: String = currentSearchMode) {
+        // service_searcher.xml 由同一套视图根据入口切换 value/fuzzy/nearby/address/AOB 状态。
+        currentSearchMode = mode.takeIf { it in setOf("exact", "fuzzy", "nearby", "addr", "machine") } ?: "exact"
         val attachedPid = MemoryEngine.getAttachedPid()
         if (attachedPid == null || !MemoryEngine.isAttachedProcessAlive()) {
             showProcessPanel()
@@ -5795,6 +5981,8 @@ class OverlayService : Service() {
 
             val message = mediumText(
                 when (currentSearchMode) {
+                    "fuzzy" -> if (searchResults.isEmpty()) "未知值（模糊）搜索" else "在当前快照中继续模糊搜索"
+                    "nearby" -> "输入要在附近搜索的值"
                     "addr" -> "输入搜索地址"
                     "machine" -> "输入要搜索的字节或特征码"
                     else -> if (searchResults.isEmpty()) "输入要搜索的值" else "找到：${searchResults.size}"
@@ -5807,21 +5995,35 @@ class OverlayService : Service() {
 
             val valueRow = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
+                visibility = if (currentSearchMode == "fuzzy") View.GONE else View.VISIBLE
             }
             val valueLine = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
-            valueLine.addView(smallText("值："), LinearLayout.LayoutParams(
+            valueLine.addView(smallText(when (currentSearchMode) {
+                "addr" -> "地址："
+                "machine" -> "特征码："
+                else -> "值："
+            }), LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             ))
             val operators = arrayOf("=", "≠", ">", "<")
             val signSpinner = whiteSpinner(operators).apply {
                 setSelection(prefsOperatorIndex.coerceIn(operators.indices))
+                visibility = if (currentSearchMode in setOf("exact", "nearby")) View.VISIBLE else View.GONE
             }
             valueLine.addView(signSpinner, LinearLayout.LayoutParams(dp(48), dp(48)))
-            val numberInput = field(savedSearchInput, "")
+            val numberInput = field(when (currentSearchMode) {
+                "addr" -> savedAddressSearchInput
+                "machine" -> savedMachineSearchInput
+                else -> savedSearchInput
+            }, when (currentSearchMode) {
+                "addr" -> "0x12345678"
+                "machine" -> "48 89 ?? ??"
+                else -> ""
+            })
             valueLine.addView(numberInput, LinearLayout.LayoutParams(0, dp(48), 1f))
             valueLine.addView(button("HEX") {
                 val raw = numberInput.text.toString().trim()
@@ -5842,7 +6044,7 @@ class OverlayService : Service() {
                 gravity = Gravity.CENTER_VERTICAL
             }
             maskLine.addView(mediumText("蒙版："))
-            val maskInput = field(savedFilterInput, "")
+            val maskInput = field(savedMachineMaskInput, "")
             maskLine.addView(maskInput, LinearLayout.LayoutParams(0, dp(48), 1f))
             maskRow.addView(maskLine)
             maskRow.addView(smallText("蒙版：?? 表示任意字节"))
@@ -5857,7 +6059,7 @@ class OverlayService : Service() {
                 gravity = Gravity.CENTER_VERTICAL
             }
             offsetLine.addView(smallText("偏移量："))
-            val offsetInput = field("", "")
+            val offsetInput = field(savedAddressOffsetInput, "")
             offsetLine.addView(offsetInput, LinearLayout.LayoutParams(0, dp(48), 1f))
             offsetRow.addView(offsetLine)
             val hexInput = android.widget.CheckBox(this).apply {
@@ -5875,7 +6077,7 @@ class OverlayService : Service() {
             val typeRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                visibility = if (currentSearchMode == "exact") View.VISIBLE else View.GONE
+                visibility = if (currentSearchMode in setOf("exact", "fuzzy", "nearby")) View.VISIBLE else View.GONE
             }
             typeRow.addView(smallText("类型："))
             val typeSpinner = whiteSpinner(typeLabels).apply {
@@ -5887,10 +6089,11 @@ class OverlayService : Service() {
             val modeRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                visibility = if (currentSearchMode == "exact") View.VISIBLE else View.GONE
+                visibility = if (currentSearchMode in setOf("exact", "nearby", "machine")) View.VISIBLE else View.GONE
             }
             val encrypted = android.widget.CheckBox(this).apply {
                 text = "此值被加密"
+                visibility = if (currentSearchMode == "machine") View.GONE else View.VISIBLE
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                 gravity = Gravity.CENTER_VERTICAL
@@ -5910,13 +6113,83 @@ class OverlayService : Service() {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             }
             modeRow.addView(ordered, LinearLayout.LayoutParams(0, dp(48), 1f))
+            if (currentSearchMode == "machine") {
+                listOf("::57", "HEX+U8", "HEX+U16").forEachIndexed { index, label ->
+                    modeRow.addView(button(label) {
+                        when (index) {
+                            0 -> Toast.makeText(this@OverlayService, "最小分组大小：57", Toast.LENGTH_SHORT).show()
+                            1 -> Toast.makeText(this@OverlayService, "HEX+U8 联合解释需要原生联合搜索引擎", Toast.LENGTH_SHORT).show()
+                            else -> Toast.makeText(this@OverlayService, "HEX+U16 联合解释需要原生联合搜索引擎", Toast.LENGTH_SHORT).show()
+                        }
+                    }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48)).apply {
+                        if (index > 0) marginStart = dp(5)
+                    })
+                }
+            }
             body.addView(modeRow)
 
             val fuzzyRow = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                visibility = if (currentSearchMode == "exact") View.VISIBLE else View.GONE
+                visibility = if (currentSearchMode in setOf("exact", "fuzzy")) View.VISIBLE else View.GONE
             }
             fuzzyRow.addView(smallText(if (searchResults.isEmpty()) "未知（模糊）搜索" else "在当前快照中继续模糊搜索"))
+
+            // 对齐 memory_range.xml：范围按钮 + nearby_row（地址/之前/后/距离）。
+            val selectedNearbyAddress = selectedIndices.firstOrNull { it in searchResults.indices }
+                ?.let { searchResultAddress(searchResults[it]) }
+                ?.takeIf { it > 0L }
+                ?: focusedSearchResultIndex.takeIf { it in searchResults.indices }
+                    ?.let { searchResultAddress(searchResults[it]) }
+                    ?.takeIf { it > 0L }
+            val nearbyAddressInput = field(
+                selectedNearbyAddress?.let { "0x${it.toString(16).uppercase()}" }.orEmpty(),
+                "地址",
+            )
+            val beforeCheck = android.widget.CheckBox(this).apply {
+                text = "之前"
+                isChecked = true
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            }
+            val afterCheck = android.widget.CheckBox(this).apply {
+                text = "后"
+                isChecked = true
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            }
+            val distanceInput = field("0x100", "距离")
+            val nearbyRow = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                visibility = if (currentSearchMode == "nearby") View.VISIBLE else View.GONE
+                addView(LinearLayout(this@OverlayService).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(smallText("地址："))
+                    addView(nearbyAddressInput, LinearLayout.LayoutParams(0, dp(48), 1f))
+                })
+                addView(LinearLayout(this@OverlayService).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(beforeCheck, LinearLayout.LayoutParams(0, dp(48), 1f))
+                    addView(afterCheck, LinearLayout.LayoutParams(0, dp(48), 1f))
+                })
+                addView(LinearLayout(this@OverlayService).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(smallText("距离："))
+                    addView(distanceInput, LinearLayout.LayoutParams(0, dp(48), 1f))
+                })
+            }
+
+            fun nearbyBounds(): Pair<Long, Long>? {
+                if (currentSearchMode != "nearby") return null
+                val address = parseAggAddress(nearbyAddressInput.text.toString()) ?: return null
+                val distance = parseAggAddress(distanceInput.text.toString())?.takeIf { it > 0L } ?: return null
+                val from = if (beforeCheck.isChecked) (address - distance).coerceAtLeast(0L) else address
+                val end = if (afterCheck.isChecked) address + distance else address + 1L
+                return from to end
+            }
 
             fun normalizeType(): String? {
                 val selected = typeIds[typeSpinner.selectedItemPosition.coerceIn(typeIds.indices)]
@@ -5931,22 +6204,40 @@ class OverlayService : Service() {
             }
 
             fun runSearch(type: String, block: () -> List<Map<String, Any>>) {
-                savedSearchInput = numberInput.text.toString().trim()
-                savedFilterInput = maskInput.text.toString().trim()
+                when (currentSearchMode) {
+                    "addr" -> {
+                        savedAddressSearchInput = numberInput.text.toString().trim()
+                        savedAddressOffsetInput = offsetInput.text.toString().trim()
+                    }
+                    "machine" -> {
+                        savedMachineSearchInput = numberInput.text.toString().trim()
+                        savedMachineMaskInput = maskInput.text.toString().trim()
+                    }
+                    else -> savedSearchInput = numberInput.text.toString().trim()
+                }
                 searchDataType = type
                 prefsOperatorIndex = signSpinner.selectedItemPosition.coerceIn(operators.indices)
                 message.text = "正在搜索…"
                 message.setTextColor(Color.WHITE)
+                if (currentSearchMode == "nearby" && nearbyBounds() == null) {
+                    message.text = "请输入有效的附近地址和距离"
+                    message.setTextColor(Color.parseColor("#FFB4AB"))
+                    return
+                }
                 Thread {
                     val autoPause = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
                         .getBoolean("agg_autopause", false)
                     val wasPaused = autoPause && isTargetProcessPaused(attachedPid)
                     val pausedByUs = autoPause && !wasPaused && setTargetProcessPaused(attachedPid, true)
+                    val previousRange = MemoryEngine.getCustomRange()
+                    val temporaryRange = nearbyBounds()
+                    if (temporaryRange != null) MemoryEngine.setCustomRange(temporaryRange.first, temporaryRange.second)
                     val results = try {
                         block()
                     } catch (_: Exception) {
                         emptyList()
                     } finally {
+                        if (temporaryRange != null) MemoryEngine.setCustomRange(previousRange.first, previousRange.second)
                         if (pausedByUs) setTargetProcessPaused(attachedPid, false)
                     }
                     handler.post {
@@ -5971,7 +6262,12 @@ class OverlayService : Service() {
             fun performKnownSearch() {
                 val raw = numberInput.text.toString().trim()
                 if (raw.isBlank()) {
-                    message.text = "输入要搜索的值"
+                    message.text = when (currentSearchMode) {
+                        "addr" -> "输入搜索地址"
+                        "machine" -> "输入要搜索的字节或特征码"
+                        "nearby" -> "输入要在附近搜索的值"
+                        else -> "输入要搜索的值"
+                    }
                     message.setTextColor(Color.parseColor("#FFB4AB"))
                     return
                 }
@@ -6025,7 +6321,7 @@ class OverlayService : Service() {
                         }
                         when (operators[signSpinner.selectedItemPosition.coerceIn(operators.indices)]) {
                             "=" -> runSearch(type) {
-                                if (searchResults.isNotEmpty() && searchDataType == type) {
+                                if (currentSearchMode != "nearby" && searchResults.isNotEmpty() && searchDataType == type) {
                                     MemoryEngine.filterResults(
                                         searchResults.mapNotNull { (it["addressInt"] as? Number)?.toLong() },
                                         value,
@@ -6091,11 +6387,14 @@ class OverlayService : Service() {
                     else -> "O"
                 }
             }
-            val rangeTitle = if (MemoryEngine.getSelectedRegionCategories().size >= 7 || selectedCodes.isBlank()) "全部内存" else selectedCodes
+            val rangeTitle = if (
+                MemoryEngine.getSelectedRegionCategories().containsAll(MemoryEngine.getRegionCategoryIds()) || selectedCodes.isBlank()
+            ) "在全部内存中" else selectedCodes
             body.addView(button(rangeTitle) { showRegionPanel() }, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(48),
             ))
+            body.addView(nearbyRow)
 
             val footer = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             footer.addView(button("取消") { showAggSearchTab() }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
@@ -6114,7 +6413,7 @@ class OverlayService : Service() {
                     "double" -> "输入双精度浮点值"
                     else -> "Xor 类型"
                 }
-                typeHint.visibility = if (currentSearchMode == "exact") View.VISIBLE else View.GONE
+                typeHint.visibility = if (currentSearchMode in setOf("exact", "fuzzy", "nearby")) View.VISIBLE else View.GONE
             }
             typeSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
@@ -6134,6 +6433,7 @@ class OverlayService : Service() {
     private fun showAggSearchMorePanel() {
         makeDraggablePanel("更多", { content ->
             content.setPadding(dp(20), dp(20), dp(20), dp(20))
+            fun divider(): View = View(this).apply { setBackgroundColor(Color.argb(52, 255, 255, 255)) }
             fun option(label: String, mode: String? = null, action: (() -> Unit)? = null): TextView = TextView(this).apply {
                 text = label
                 gravity = Gravity.CENTER_VERTICAL
@@ -6142,18 +6442,24 @@ class OverlayService : Service() {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
                 setBackgroundColor(Color.TRANSPARENT)
                 setOnClickListener {
-                    if (mode != null) {
-                        currentSearchMode = mode
-                        showAggSearchDialog()
-                    } else action?.invoke()
+                    if (mode != null) showAggSearchDialog(mode) else action?.invoke()
                 }
             }
-            content.addView(option("已知值搜索", "exact"), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-            content.addView(option("地址搜索", "addr"), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-            content.addView(option("特征码搜索", "machine"), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            val entries = listOf<Pair<String, String?>>(
+                "已知值搜索" to "exact",
+                "变化搜索" to "fuzzy",
+                "附近搜索" to "nearby",
+                "地址搜索" to "addr",
+                "特征码搜索" to "machine",
+            )
+            entries.forEach { (label, mode) ->
+                content.addView(option(label, mode), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+                content.addView(divider(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
+            }
             content.addView(option("搜索结果过滤") { showAggResultFilterPanel() }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            content.addView(divider(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
             content.addView(option("设置搜索范围") { showRegionPanel() }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        }, 340, 340, onBack = { showAggSearchDialog() }, titleIcon = R.drawable.ic_menu_white_24dp)
+        }, 340, 470, onBack = { showAggSearchDialog(currentSearchMode) }, titleIcon = R.drawable.ic_menu_white_24dp)
     }
 
     private fun showSearchPanelLegacyCard() {
@@ -6402,307 +6708,225 @@ class OverlayService : Service() {
         MemoryEngine.resetSearchState()
     }
 
-    private fun showRegionPanel() {
+    private fun showRegionPanel(initialFrom: String? = null, initialTo: String? = null) {
         saveLastPanel("search")
+        val previousRange = MemoryEngine.getCustomRange()
+        val fromText = initialFrom ?: previousRange.first?.let { "0x${it.toString(16).uppercase()}" }.orEmpty()
+        val toText = initialTo ?: previousRange.second?.let { "0x${it.toString(16).uppercase()}" }.orEmpty()
         makeDraggablePanel("内存范围", { content ->
-            content.setPadding(0, 0, 0, 0)
-            val body = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(20), dp(20), dp(20), dp(20))
-            }
-            val scroll = ScrollView(this).apply {
-                isFillViewport = true
-                addView(body)
-            }
-            content.addView(scroll, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f,
-            ))
-
-            val previousCategories = MemoryEngine.getSelectedRegionCategories()
-            val selected = previousCategories.toMutableSet()
-            val previousRange = MemoryEngine.getCustomRange()
-            var summaryCache: List<Map<String, Any>> = emptyList()
-
-            fun input(initial: String, hintText: String): EditText = EditText(this).apply {
-                setText(initial)
-                hint = hintText
-                setSingleLine(true)
-                setTextColor(Color.WHITE)
-                setHintTextColor(Color.parseColor("#938F99"))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                setPadding(dp(8), 0, dp(8), 0)
-                inputType = android.text.InputType.TYPE_CLASS_TEXT
-            }
-            fun label(textValue: String): TextView = TextView(this).apply {
-                text = textValue
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            // 对齐 memory_range.xml：范围按钮、从/到输入和两个 48dp RegionListFiltered 入口。
+            content.setPadding(dp(20), dp(20), dp(20), dp(20))
+            fun label(value: String): TextView = TextView(this).apply {
+                text = value
                 gravity = Gravity.CENTER_VERTICAL
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             }
-            fun button(textValue: String, action: () -> Unit): TextView = TextView(this).apply {
-                text = textValue
+            fun field(value: String): EditText = EditText(this).apply {
+                setText(value)
+                setSingleLine(true)
+                inputType = android.text.InputType.TYPE_CLASS_TEXT
+                setTextColor(Color.WHITE)
+                setHintTextColor(Color.parseColor("#B8B2BD"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            }
+            fun button(value: String, action: () -> Unit): TextView = TextView(this).apply {
+                text = value
                 gravity = Gravity.CENTER
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                 minWidth = dp(48)
-                background = aggMenuDrawable(Color.argb(38, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
+                background = aggMenuDrawable(Color.argb(42, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
                 setOnClickListener { action() }
             }
 
-            val categoryContainer = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                visibility = View.GONE
-            }
-            lateinit var rangeButton: TextView
-            fun updateRangeTitle() {
-                rangeButton.text = if (selected.size == 7) {
-                    "全部内存"
-                } else {
-                    selected.joinToString(",") { id ->
-                        when (id) {
-                            "heap" -> "Ch"
-                            "java" -> "Jh"
-                            "anonymous" -> "A"
-                            "stack" -> "S"
-                            "app" -> "Cd"
-                            "system" -> "O"
-                            else -> "O"
-                        }
-                    }.ifBlank { "选择内存范围" }
-                }
-            }
-            fun renderCategories() {
-                categoryContainer.removeAllViews()
-                if (summaryCache.isEmpty()) {
-                    categoryContainer.addView(TextView(this).apply {
-                        text = "正在读取内存区域…"
-                        setTextColor(Color.parseColor("#CAC4D0"))
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                        setPadding(dp(8), dp(8), dp(8), dp(8))
-                    })
-                    return
-                }
-                summaryCache.forEach { item ->
-                    val id = item["id"] as String
-                    val labelText = item["label"] as String
-                    val count = (item["count"] as Number).toInt()
-                    val check = android.widget.CheckBox(this).apply {
-                        text = "$labelText  ($count)"
-                        isChecked = id in selected
-                        setTextColor(Color.WHITE)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                        buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-                        setOnCheckedChangeListener { _, checked ->
-                            if (checked) selected.add(id) else selected.remove(id)
-                            updateRangeTitle()
-                        }
-                    }
-                    categoryContainer.addView(check, LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        dp(48),
-                    ))
-                }
-            }
+            val selected = MemoryEngine.getSelectedRegionCategories()
+            val allIds = MemoryEngine.getRegionCategoryIds()
+            val codeMap = mapOf(
+                "heap" to "Ch", "java" to "Jh", "anonymous" to "A", "stack" to "S",
+                "app" to "Cd", "system" to "O", "other" to "O",
+            )
+            val rangeTitle = if (selected.containsAll(allIds)) "在全部内存中"
+            else selected.joinToString(",") { codeMap[it] ?: "O" }.ifBlank { "选择内存范围" }
 
-            rangeButton = button("全部内存") {
-                categoryContainer.visibility = if (categoryContainer.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-            }
-            updateRangeTitle()
-            body.addView(rangeButton, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(48),
-            ))
-            body.addView(categoryContainer)
+            val fromInput = field(fromText)
+            val toInput = field(toText)
+            content.addView(button(rangeTitle) {
+                showAggRegionCategoriesPanel(fromInput.text.toString(), toInput.text.toString())
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
 
-            val fromInput = input(previousRange.first?.let { "0x${it.toString(16).uppercase()}" }.orEmpty(), "起始地址")
-            val toInput = input(previousRange.second?.let { "0x${it.toString(16).uppercase()}" }.orEmpty(), "结束地址")
-            val fromRow = LinearLayout(this).apply {
+            fun rangeRow(prefix: String, input: EditText, selectStart: Boolean): LinearLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                addView(label("从："), LinearLayout.LayoutParams(dp(42), dp(48)))
-                addView(fromInput, LinearLayout.LayoutParams(0, dp(48), 1f))
-                addView(button("区域") {
-                    val first = MemoryEngine.getMemoryRegions().minByOrNull { (it["startAddress"] as Number).toLong() }
-                    val address = (first?.get("startAddress") as? Number)?.toLong()
-                    if (address != null) fromInput.setText("0x${address.toString(16).uppercase()}")
-                }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(5) })
+                addView(label(prefix))
+                addView(input, LinearLayout.LayoutParams(0, dp(48), 1f))
+                addView(button("区") {
+                    showAggRegionPickerPanel(selectStart, fromInput.text.toString(), toInput.text.toString())
+                }, LinearLayout.LayoutParams(dp(48), dp(48)))
             }
-            body.addView(fromRow)
-            val toRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(label("至："), LinearLayout.LayoutParams(dp(42), dp(48)))
-                addView(toInput, LinearLayout.LayoutParams(0, dp(48), 1f))
-                addView(button("区域") {
-                    val last = MemoryEngine.getMemoryRegions().maxByOrNull { (it["endAddress"] as Number).toLong() }
-                    val address = (last?.get("endAddress") as? Number)?.toLong()
-                    if (address != null) toInput.setText("0x${address.toString(16).uppercase()}")
-                }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(5) })
-            }
-            body.addView(toRow)
+            content.addView(rangeRow("从：", fromInput, true))
+            content.addView(rangeRow("到：", toInput, false))
 
-            val nearbyAddress = input("", "附近地址")
-            body.addView(LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(label("地址："), LinearLayout.LayoutParams(dp(56), dp(48)))
-                addView(nearbyAddress, LinearLayout.LayoutParams(0, dp(48), 1f))
-            })
-            val beforeCheck = android.widget.CheckBox(this).apply {
-                text = "之前"
-                isChecked = true
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            val status = TextView(this).apply {
+                text = "留空表示不限制起止地址"
+                setTextColor(Color.parseColor("#B8B2BD"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setPadding(0, dp(4), 0, dp(4))
             }
-            val afterCheck = android.widget.CheckBox(this).apply {
-                text = "之后"
-                isChecked = true
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-            }
-            body.addView(LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                addView(beforeCheck, LinearLayout.LayoutParams(0, dp(48), 1f))
-                addView(afterCheck, LinearLayout.LayoutParams(0, dp(48), 1f))
-            })
-            val distanceInput = input("", "距离，例如 0x1000")
-            body.addView(LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(label("距离："), LinearLayout.LayoutParams(dp(56), dp(48)))
-                addView(distanceInput, LinearLayout.LayoutParams(0, dp(48), 1f))
-            })
+            content.addView(status)
 
-            val showPerm = android.widget.CheckBox(this).apply { text = "权限"; isChecked = true; setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f) }
-            val showMem = android.widget.CheckBox(this).apply { text = "内存"; isChecked = true; setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f) }
-            val showPath = android.widget.CheckBox(this).apply { text = "路径"; isChecked = true; setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f) }
-            val showStart = android.widget.CheckBox(this).apply { text = "开始"; isChecked = true; setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f) }
-            val showSearch = android.widget.CheckBox(this).apply { text = "搜索"; isChecked = false; setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f) }
-            val regionHeader = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                addView(showPerm, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                addView(showMem, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                addView(showPath, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                addView(showStart, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                addView(showSearch, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            }
-            body.addView(regionHeader)
-            val regionSearch = input("", "搜索")
-            body.addView(regionSearch, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-            val regionList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            body.addView(regionList)
-            fun renderRegionList() {
-                regionList.removeAllViews()
-                val keyword = regionSearch.text.toString().trim().lowercase()
-                MemoryEngine.getMemoryRegions().asSequence().filter { region ->
-                    if (keyword.isBlank()) true else listOf(
-                        region["name"]?.toString().orEmpty(),
-                        region["category"]?.toString().orEmpty(),
-                        (region["startAddress"] as? Number)?.toLong()?.toString(16).orEmpty(),
-                    ).any { it.lowercase().contains(keyword) }
-                }.take(80).forEach { region ->
-                    val start = (region["startAddress"] as? Number)?.toLong() ?: 0L
-                    val end = (region["endAddress"] as? Number)?.toLong() ?: 0L
-                    val category = region["category"]?.toString().orEmpty()
-                    val name = region["name"]?.toString()?.takeIf { it.isNotBlank() } ?: "[anon]"
-                    val mem = if (end > start) "${((end - start) / 1024).coerceAtLeast(1)}K" else "0K"
-                    val perm = when (category) {
-                        "app" -> "r-xp"
-                        "system" -> "r--p"
-                        "stack" -> "rw-p"
-                        else -> "rw-p"
-                    }
-                    val line = buildString {
-                        if (showPerm.isChecked) append(perm).append(' ')
-                        if (showMem.isChecked) append(aggRegionCode(start)).append('/').append(mem).append(' ')
-                        if (showPath.isChecked) append(name).append(' ')
-                        if (showStart.isChecked) append("0x${start.toString(16).uppercase()}")
-                    }
-                    regionList.addView(TextView(this).apply {
-                        text = line.ifBlank { "0x${start.toString(16).uppercase()}" }
-                        setTextColor(Color.WHITE)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                        setPadding(dp(10), dp(7), dp(10), dp(7))
-                        typeface = android.graphics.Typeface.MONOSPACE
-                        setOnClickListener {
-                            fromInput.setText("0x${start.toString(16).uppercase()}")
-                            toInput.setText("0x${end.toString(16).uppercase()}")
-                        }
-                    }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-                }
-            }
-            val rerenderWatcher = object : android.text.TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = renderRegionList()
-                override fun afterTextChanged(s: android.text.Editable?) = Unit
-            }
-            regionSearch.addTextChangedListener(rerenderWatcher)
-            listOf(showPerm, showMem, showPath, showStart, showSearch).forEach { box -> box.setOnCheckedChangeListener { _, _ -> renderRegionList() } }
-            renderRegionList()
-
-            Thread {
-                val summary = MemoryEngine.getRegionCategorySummary()
-                handler.post {
-                    summaryCache = summary
-                    renderCategories()
-                    updateRangeTitle()
-                }
-            }.start()
-
-            val actions = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(0, dp(8), 0, 0)
-            }
-            actions.addView(button("取消") { showAggSearchDialog() }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
+            val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            actions.addView(button("取消") { showAggSearchDialog(currentSearchMode) }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
             actions.addView(button("应用") {
-                if (selected.isEmpty()) {
-                    Toast.makeText(this@OverlayService, "至少选择一个内存范围", Toast.LENGTH_SHORT).show()
+                val from = parseAggAddress(fromInput.text.toString())
+                val to = parseAggAddress(toInput.text.toString())
+                if (from != null && to != null && to <= from) {
+                    status.text = "结束地址必须大于起始地址"
+                    status.setTextColor(Color.parseColor("#FFB4AB"))
                     return@button
                 }
-                var rangeFrom = parseAggAddress(fromInput.text.toString())
-                var rangeTo = parseAggAddress(toInput.text.toString())
-                val nearby = parseAggAddress(nearbyAddress.text.toString())
-                val distance = parseAggAddress(distanceInput.text.toString())
-                if (nearby != null && distance != null && distance > 0L) {
-                    rangeFrom = if (beforeCheck.isChecked) (nearby - distance).coerceAtLeast(0L) else nearby
-                    rangeTo = if (afterCheck.isChecked) nearby + distance else nearby + 1L
-                }
-                if (rangeFrom?.let { from -> rangeTo?.let { to -> to <= from } } == true) {
-                    Toast.makeText(this@OverlayService, "结束地址必须大于起始地址", Toast.LENGTH_SHORT).show()
-                    return@button
-                }
-                val appliedFrom = rangeFrom
-                val appliedTo = rangeTo
                 Thread {
-                    val categoriesOk = MemoryEngine.setRegionCategories(selected)
-                    val rangeOk = categoriesOk && MemoryEngine.setCustomRange(appliedFrom, appliedTo)
-                    if (!rangeOk) {
-                        MemoryEngine.setRegionCategories(previousCategories)
-                        MemoryEngine.setCustomRange(previousRange.first, previousRange.second)
-                    } else {
+                    val ok = MemoryEngine.setCustomRange(from, to)
+                    if (ok) {
                         getSharedPreferences("gg_overlay", Context.MODE_PRIVATE).edit()
-                            .putStringSet("memory_region_categories", selected.toSet())
-                            .putString("memory_range_from", appliedFrom?.toString(16).orEmpty())
-                            .putString("memory_range_to", appliedTo?.toString(16).orEmpty())
+                            .putString("memory_range_from", from?.toString(16).orEmpty())
+                            .putString("memory_range_to", to?.toString(16).orEmpty())
                             .apply()
                         resetSearchSession()
                     }
                     handler.post {
-                        Toast.makeText(
-                            this@OverlayService,
-                            if (rangeOk) "内存范围已应用" else "范围内没有可读写内存",
-                            Toast.LENGTH_SHORT,
-                        ).show()
-                        if (rangeOk) showAggSearchDialog()
+                        if (ok) showAggSearchDialog(currentSearchMode)
+                        else {
+                            status.text = "范围内没有可搜索的内存"
+                            status.setTextColor(Color.parseColor("#FFB4AB"))
+                        }
                     }
                 }.start()
             }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(3) })
-            body.addView(actions)
-        }, 390, 600, onBack = { showAggSearchDialog() }, titleIcon = R.drawable.ic_agg_memory)
+            content.addView(actions)
+        }, 390, 330, onBack = { showAggSearchDialog(currentSearchMode) }, titleIcon = R.drawable.ic_agg_memory)
+    }
+
+    private fun showAggRegionCategoriesPanel(fromText: String, toText: String) {
+        val selected = MemoryEngine.getSelectedRegionCategories().toMutableSet()
+        makeDraggablePanel("内存范围", { content ->
+            content.setPadding(dp(20), dp(20), dp(20), dp(20))
+            val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val scroll = ScrollView(this).apply { addView(list) }
+            content.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+            val status = TextView(this).apply {
+                text = "正在读取内存区域…"
+                setTextColor(Color.parseColor("#B8B2BD"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            }
+            list.addView(status)
+            Thread {
+                val summary = MemoryEngine.getRegionCategorySummary()
+                handler.post {
+                    list.removeAllViews()
+                    summary.forEach { item ->
+                        val id = item["id"]?.toString() ?: return@forEach
+                        val label = item["label"]?.toString() ?: id
+                        val count = (item["count"] as? Number)?.toInt() ?: 0
+                        list.addView(android.widget.CheckBox(this).apply {
+                            text = "$label  ($count)"
+                            isChecked = id in selected
+                            setTextColor(Color.WHITE)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            buttonTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+                            setOnCheckedChangeListener { _, checked ->
+                                if (checked) selected.add(id) else selected.remove(id)
+                            }
+                        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
+                    }
+                }
+            }.start()
+            fun action(value: String, run: () -> Unit): TextView = TextView(this).apply {
+                text = value
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                background = aggMenuDrawable(Color.argb(42, 255, 255, 255), 4, Color.parseColor("#B8B2BD"))
+                setOnClickListener { run() }
+            }
+            val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            actions.addView(action("取消") { showRegionPanel(fromText, toText) }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(3) })
+            actions.addView(action("应用") {
+                if (selected.isEmpty()) {
+                    Toast.makeText(this@OverlayService, "至少选择一个内存范围", Toast.LENGTH_SHORT).show()
+                    return@action
+                }
+                Thread {
+                    val ok = MemoryEngine.setRegionCategories(selected)
+                    if (ok) {
+                        getSharedPreferences("gg_overlay", Context.MODE_PRIVATE).edit()
+                            .putStringSet("memory_region_categories", selected.toSet()).apply()
+                        resetSearchSession()
+                    }
+                    handler.post {
+                        Toast.makeText(this@OverlayService, if (ok) "内存范围已更新" else "所选范围没有可搜索内存", Toast.LENGTH_SHORT).show()
+                        showRegionPanel(fromText, toText)
+                    }
+                }.start()
+            }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(3) })
+            content.addView(actions)
+        }, 390, 560, onBack = { showRegionPanel(fromText, toText) }, titleIcon = R.drawable.ic_agg_memory)
+    }
+
+    private fun showAggRegionPickerPanel(selectStart: Boolean, fromText: String, toText: String) {
+        makeDraggablePanel(if (selectStart) "选择起始区域" else "选择结束区域", { content ->
+            content.setPadding(dp(20), dp(20), dp(20), dp(20))
+            val search = EditText(this).apply {
+                hint = "搜索区域、路径或地址"
+                setSingleLine(true)
+                setTextColor(Color.WHITE)
+                setHintTextColor(Color.parseColor("#B8B2BD"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            }
+            content.addView(search)
+            val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val scroll = ScrollView(this).apply { addView(list) }
+            content.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+            val allRegions = MemoryEngine.getAllMemoryRegions()
+                .filter { it["category"]?.toString() in MemoryEngine.getSelectedRegionCategories() }
+                .sortedBy { (it["startAddress"] as? Number)?.toLong() ?: Long.MAX_VALUE }
+            fun render() {
+                list.removeAllViews()
+                val keyword = search.text.toString().trim().lowercase()
+                allRegions.asSequence().filter { region ->
+                    if (keyword.isBlank()) true else listOf(
+                        region["name"], region["category"], region["permissions"],
+                        (region["startAddress"] as? Number)?.toLong()?.toString(16),
+                    ).joinToString(" ") { it?.toString().orEmpty() }.lowercase().contains(keyword)
+                }.take(160).forEach { region ->
+                    val start = (region["startAddress"] as? Number)?.toLong() ?: return@forEach
+                    val end = (region["endAddress"] as? Number)?.toLong() ?: return@forEach
+                    val permissions = region["permissions"]?.toString().orEmpty()
+                    val name = region["name"]?.toString()?.ifBlank { "[anon]" } ?: "[anon]"
+                    val sizeKb = ((end - start) / 1024L).coerceAtLeast(1L)
+                    list.addView(TextView(this).apply {
+                        text = "$permissions  ${sizeKb}K  $name
+${start.toString(16).uppercase()}-${end.toString(16).uppercase()}"
+                        setTextColor(Color.WHITE)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        typeface = android.graphics.Typeface.MONOSPACE
+                        setPadding(dp(8), dp(7), dp(8), dp(7))
+                        setOnClickListener {
+                            val newFrom = if (selectStart) "0x${start.toString(16).uppercase()}" else fromText
+                            val newTo = if (selectStart) toText else "0x${end.toString(16).uppercase()}"
+                            showRegionPanel(newFrom, newTo)
+                        }
+                    }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+                    list.addView(classDivider(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
+                }
+            }
+            search.addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = render()
+                override fun afterTextChanged(s: android.text.Editable?) = Unit
+            })
+            render()
+        }, 430, 600, onBack = { showRegionPanel(fromText, toText) }, titleIcon = R.drawable.ic_agg_memory)
     }
 
     private fun refreshSearchValues() {
@@ -10901,6 +11125,10 @@ mainMenu()""",
                 })
             }
         }
+    }
+
+    private fun classDivider(): View = View(this).apply {
+        setBackgroundColor(Color.argb(192, 255, 255, 255))
     }
 
     private fun emptyHint(message: String): TextView = TextView(this).apply {
