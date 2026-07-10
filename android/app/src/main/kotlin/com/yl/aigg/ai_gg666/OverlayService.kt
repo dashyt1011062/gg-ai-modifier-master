@@ -1711,12 +1711,9 @@ class OverlayService : Service() {
         val isLandscape = screenW > screenH
         val orientationSuffix = if (isLandscape) "land" else "port"
         val prefs = getSharedPreferences("gg_overlay", Context.MODE_PRIVATE)
-        val defaultPanelWidthDp = if (isLandscape) 760 else 408
-        val defaultPanelHeightDp = if (isLandscape) 438 else 586
-        val panelWidthDp = prefs.getInt("agg_window_width_$orientationSuffix", defaultPanelWidthDp)
-        val panelHeightDp = prefs.getInt("agg_window_height_$orientationSuffix", defaultPanelHeightDp)
-        val panelW = dp(panelWidthDp).coerceAtMost((screenW - dp(10)).coerceAtLeast(1))
-        val panelH = dp(panelHeightDp).coerceAtMost((screenH - dp(10)).coerceAtLeast(1))
+        // AGG 主服务窗口打开后覆盖整个可用屏幕；宽高滑块只保留兼容数据，不再缩小主菜单。
+        val panelW = screenW
+        val panelH = screenH
 
         val attachedPid = MemoryEngine.getAttachedPid()
         val pid = attachedPid?.takeIf { MemoryEngine.isAttachedProcessAlive() }
@@ -1893,12 +1890,11 @@ class OverlayService : Service() {
         val toolbarRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         }
-        val toolbar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f)
+        val toolbar = AggWrapLayout(this).apply {
+            minimumHeight = dp(48)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         val toolbarMore = iconView(R.drawable.ic_menu_white_24dp, 45, 12) {
             when (aggMainTab) {
@@ -2943,16 +2939,13 @@ class OverlayService : Service() {
                     fun selectedResults(): List<Map<String, Any>> = selectedIndices
                         .filter { it in searchResults.indices }
                         .map { searchResults[it] }
-                    toolbarAction(R.drawable.ic_magnify_white_24dp) { showAggSearchDialog() }
-                    toolbarAction(R.drawable.ic_filter_white_24dp) { showAggResultFilterPanel() }
-                    toolbarAction(R.drawable.ic_select_all_white_24dp) {
-                        if (selectedIndices.size == searchResults.size && searchResults.isNotEmpty()) selectedIndices.clear()
-                        else {
-                            selectedIndices.clear()
-                            selectedIndices.addAll(searchResults.indices)
-                        }
-                        renderTab(1)
+                    // 原版搜索工具栏顺序：已知值搜索、变化搜索、附近搜索、编辑、保存、筛选、选择。
+                    toolbarAction(R.drawable.ic_search_selected_white_24dp) { showAggSearchDialog() }
+                    toolbarAction(R.drawable.ic_search_changed_white_24dp) {
+                        currentSearchMode = "exact"
+                        showAggSearchDialog()
                     }
+                    toolbarAction(R.drawable.ic_search_nearby_white_24dp) { showRegionPanel() }
                     toolbarAction(R.drawable.ic_agg_edit) {
                         val selected = selectedResults()
                         when (selected.size) {
@@ -3002,6 +2995,25 @@ class OverlayService : Service() {
                                 }
                             }.start()
                         }
+                    }
+                    toolbarAction(R.drawable.ic_filter_white_24dp) { showAggResultFilterPanel() }
+                    toolbarAction(R.drawable.ic_select_all_white_24dp) {
+                        if (selectedIndices.size == searchResults.size && searchResults.isNotEmpty()) selectedIndices.clear()
+                        else {
+                            selectedIndices.clear()
+                            selectedIndices.addAll(searchResults.indices)
+                        }
+                        renderTab(1)
+                    }
+                    toolbarAction(R.drawable.ic_select_inverse_white_24dp) {
+                        val old = selectedIndices.toSet()
+                        selectedIndices.clear()
+                        searchResults.indices.filterNot { it in old }.forEach { selectedIndices.add(it) }
+                        renderTab(1)
+                    }
+                    toolbarAction(R.drawable.ic_select_off_white_24dp) {
+                        selectedIndices.clear()
+                        renderTab(1)
                     }
                     toolbarAction(R.drawable.ic_refresh_white_18dp) {
                         if (searchResults.isEmpty()) showAggSearchDialog() else {
@@ -3117,8 +3129,8 @@ class OverlayService : Service() {
         }
         val blurEnabled = prefs.getBoolean("agg_window_blur", false) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
         if (blurEnabled) windowFlags = windowFlags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-        val defaultX = ((screenW - panelW) / 2).coerceAtLeast(0)
-        val defaultY = ((screenH - panelH) / 2).coerceAtLeast(0)
+        val defaultX = 0
+        val defaultY = 0
         val params = WindowManager.LayoutParams(
             panelW,
             panelH,
@@ -3127,10 +3139,8 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = prefs.getInt("agg_window_x_$orientationSuffix", defaultX)
-                .coerceIn(0, (screenW - panelW).coerceAtLeast(0))
-            y = prefs.getInt("agg_window_y_$orientationSuffix", defaultY)
-                .coerceIn(0, (screenH - panelH).coerceAtLeast(0))
+            x = 0
+            y = 0
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && blurEnabled) {
                 setBlurBehindRadius(dp(prefs.getInt("agg_window_blur_radius", 18)))
             }
@@ -3146,12 +3156,6 @@ class OverlayService : Service() {
         try {
             wm?.addView(panel, params)
             activePanel = "menu"
-            enableCompactPanelDrag(appFrame, params, panelW, panelH) { x, y ->
-                prefs.edit()
-                    .putInt("agg_window_x_$orientationSuffix", x)
-                    .putInt("agg_window_y_$orientationSuffix", y)
-                    .apply()
-            }
             renderTab(aggMainTab)
             panel?.animate()?.alpha(1f)?.scaleX(1f)?.scaleY(1f)?.setDuration(120L)?.start()
             oldPanel?.let { old -> handler.postDelayed({ try { wm?.removeView(old) } catch (_: Exception) {} }, 24L) }
@@ -5544,7 +5548,8 @@ class OverlayService : Service() {
     }
 
     private fun showAggSearchDialog() {
-        if (currentSearchMode !in setOf("exact", "addr", "machine")) currentSearchMode = "exact"
+        // 主工具栏放大镜始终打开原版“已知值 + 未知值”搜索器。
+        currentSearchMode = "exact"
         val attachedPid = MemoryEngine.getAttachedPid()
         if (attachedPid == null || !MemoryEngine.isAttachedProcessAlive()) {
             showProcessPanel()
